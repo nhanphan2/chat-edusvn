@@ -13,7 +13,7 @@
           "value": "*"
         },
         {
-          "key": "Access-Control-Allow-Methods", 
+          "key": "Access-Control-Allow-Methods",
           "value": "GET, POST, OPTIONS"
         },
         {
@@ -23,5 +23,10 @@
       ]
     }
   ],
-  "outputDirectory": "."
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    }
+  ]
 }
