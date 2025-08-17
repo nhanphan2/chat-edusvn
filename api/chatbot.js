@@ -1,8 +1,23 @@
-// 🔥 api/chatbot.js - Vercel API Route
+// 🔥 api/chatbot.js - Vercel API Route with Enhanced Security
 // Thay thế hoàn toàn Google Apps Script + Google Sheets
 
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs, addDoc, limit } from 'firebase/firestore';
+
+// 🔐 Validate environment variables
+const requiredEnvVars = [
+  'FIREBASE_API_KEY',
+  'FIREBASE_AUTH_DOMAIN', 
+  'FIREBASE_PROJECT_ID',
+  'FIREBASE_STORAGE_BUCKET',
+  'FIREBASE_MESSAGING_SENDER_ID',
+  'FIREBASE_APP_ID'
+];
+
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+  throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
+}
 
 // Firebase config từ environment variables
 const firebaseConfig = {
@@ -26,18 +41,63 @@ if (!app) {
 class FirestoreChatbot {
   constructor() {
     this.db = db;
+    this.maxMessageLength = 500; // Giới hạn độ dài message
+    this.rateLimitWindow = 60 * 1000; // 1 phút
+    this.maxRequestsPerWindow = 30; // 30 requests per minute
+  }
+
+  // 🛡️ Input validation
+  validateInput(userMessage, userId) {
+    if (!userMessage || typeof userMessage !== 'string') {
+      return { valid: false, error: 'Message must be a non-empty string' };
+    }
+
+    if (userMessage.length > this.maxMessageLength) {
+      return { valid: false, error: `Message too long (max ${this.maxMessageLength} characters)` };
+    }
+
+    if (userId && typeof userId !== 'string') {
+      return { valid: false, error: 'UserId must be a string' };
+    }
+
+    // Basic XSS prevention
+    const dangerousPatterns = /<script|javascript:|data:text\/html|vbscript:|onload=|onerror=/i;
+    if (dangerousPatterns.test(userMessage)) {
+      return { valid: false, error: 'Invalid message content' };
+    }
+
+    return { valid: true };
   }
 
   // 🎯 Main endpoint handler
   async handleRequest(userMessage, userId = 'anonymous', lang = 'vi') {
     try {
-      console.log('📨 Received request:', { userMessage, userId, lang });
+      console.log('📨 Received request:', { 
+        messageLength: userMessage?.length, 
+        userId, 
+        lang,
+        timestamp: new Date().toISOString()
+      });
       
-      if (!userMessage) {
+      // Validate input
+      const validation = this.validateInput(userMessage, userId);
+      if (!validation.valid) {
         return {
           success: false,
-          error: 'No message provided',
-          response: "Vui lòng nhập câu hỏi của bạn",
+          error: validation.error,
+          response: lang === 'en' ? 'Invalid input' : "Dữ liệu đầu vào không hợp lệ",
+          confidence: 0,
+          category: "error"
+        };
+      }
+
+      // Clean message
+      const cleanMessage = userMessage.trim();
+      if (!cleanMessage) {
+        return {
+          success: false,
+          error: 'Empty message',
+          response: lang === 'en' ? 'Please enter your question' : "Vui lòng nhập câu hỏi của bạn",
           confidence: 0,
           category: "error"
         };
@@ -45,11 +105,11 @@ class FirestoreChatbot {
 
       // BƯỚC 1: Thử EXACT MATCH
       console.log('🎯 === STEP 1: Trying EXACT MATCH ===');
-      const exactResponse = await this.findExactMatch(userMessage);
+      const exactResponse = await this.findExactMatch(cleanMessage);
       
       if (exactResponse.found) {
         console.log('✅ EXACT MATCH found');
-        await this.logQuery(userMessage, exactResponse, userId);
+        await this.logQuery(cleanMessage, exactResponse, userId);
         
         return {
           success: true,
@@ -65,11 +125,11 @@ class FirestoreChatbot {
 
       // BƯỚC 2: Thử SIMILARITY MATCH
       console.log('🔍 === STEP 2: Trying SIMILARITY MATCH ===');
-      const similarityResponse = await this.findSimilarityMatch(userMessage);
+      const similarityResponse = await this.findSimilarityMatch(cleanMessage);
       
       if (similarityResponse.found) {
         console.log(`✅ SIMILARITY MATCH found - Confidence: ${similarityResponse.confidence}`);
-        await this.logQuery(userMessage, similarityResponse, userId);
+        await this.logQuery(cleanMessage, similarityResponse, userId);
         
         return {
           success: true,
@@ -82,11 +142,15 @@ class FirestoreChatbot {
           timestamp: new Date().toISOString()
         };
       } else {
-        console.log(`❌ NO MATCH found for: "${userMessage}"`);
+        console.log(`❌ NO MATCH found for: "${cleanMessage}"`);
+        
+        const noMatchMessage = lang === 'en' 
+          ? 'Sorry, I could not find a suitable answer for your question.'
+          : 'Xin lỗi, tôi không thể tìm thấy câu trả lời phù hợp cho câu hỏi của bạn.';
         
         return {
           success: false,
-          response: '',
+          response: noMatchMessage,
           confidence: similarityResponse.confidence || 0,
           similarity: similarityResponse.similarity || 0,
           category: 'no_match',
@@ -97,10 +161,14 @@ class FirestoreChatbot {
 
     } catch (error) {
       console.error('❌ Error in handleRequest:', error);
+      const errorMessage = lang === 'en' 
+        ? 'An error occurred while processing your request.'
+        : 'Đã xảy ra lỗi khi xử lý yêu cầu của bạn.';
+      
       return {
         success: false,
         error: error.toString(),
-        response: '',
+        response: errorMessage,
         confidence: 0,
         category: "error"
       };
@@ -165,9 +233,20 @@ class FirestoreChatbot {
   async findSimilarityMatch(userMessage) {
     try {
       const normalizedMessage = this.normalizeText(userMessage);
-      const messageWords = normalizedMessage.split(' ').filter(word => word.length > 0);
+      const messageWords = normalizedMessage.split(' ').filter(word => word.length > 1);
       
       console.log(`🔍 Searching for similarity with words: [${messageWords.join(', ')}]`);
+
+      if (messageWords.length === 0) {
+        return {
+          found: false,
+          answer: '',
+          category: 'no_match',
+          confidence: 0,
+          similarity: 0,
+          matchType: 'none'
+        };
+      }
 
       const q = query(
         collection(this.db, 'chatbot_data'),
@@ -273,8 +352,10 @@ class FirestoreChatbot {
 
   // 🧮 Calculate Jaccard similarity
   calculateSimilarity(query, target) {
-    const queryWords = this.normalizeText(query).split(' ').filter(word => word.length > 0);
-    const targetWords = this.normalizeText(target).split(' ').filter(word => word.length > 0);
+    const queryWords = this.normalizeText(query).split(' ').filter(word => word.length > 1);
+    const targetWords = this.normalizeText(target).split(' ').filter(word => word.length > 1);
+    
+    if (queryWords.length === 0 || targetWords.length === 0) return 0;
     
     const querySet = new Set(queryWords);
     const targetSet = new Set(targetWords);
@@ -319,10 +400,50 @@ class FirestoreChatbot {
 
 // 📡 VERCEL API HANDLER
 export default async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // 🔒 CORS Security - Chỉ cho phép edus.vn
+  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
+    'https://edus.vn',
+    'https://www.edus.vn',
+    'http://localhost:3000' // Cho development
+  ];
+  
+  const origin = req.headers.origin;
+  const referer = req.headers.referer;
+  
+  console.log('🔍 Request from:', { origin, referer });
+  
+  // Kiểm tra origin
+  let isAllowed = false;
+  if (origin && allowedOrigins.includes(origin)) {
+    isAllowed = true;
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (referer) {
+    // Kiểm tra referer nếu không có origin
+    const refererOrigin = new URL(referer).origin;
+    if (allowedOrigins.includes(refererOrigin)) {
+      isAllowed = true;
+      res.setHeader('Access-Control-Allow-Origin', refererOrigin);
+    }
+  }
+  
+  if (!isAllowed && process.env.NODE_ENV === 'production') {
+    console.log('❌ Blocked request from unauthorized origin:', { origin, referer });
+    res.status(403).json({
+      success: false,
+      error: 'Access denied - Domain not allowed',
+      message: 'This API is only accessible from authorized domains'
+    });
+    return;
+  }
+  
+  // Nếu development hoặc allowed thì set headers
+  if (isAllowed || process.env.NODE_ENV !== 'production') {
+    res.setHeader('Access-Control-Allow-Origin', origin || allowedOrigins[0]);
+  }
+  
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
 
   // Handle preflight request
   if (req.method === 'OPTIONS') {
@@ -346,7 +467,11 @@ export default async function handler(req, res) {
       lang = req.body.lang || 'vi';
     }
     else {
-      res.status(405).json({ error: 'Method not allowed' });
+      res.status(405).json({ 
+        success: false,
+        error: 'Method not allowed',
+        allowedMethods: ['GET', 'POST', 'OPTIONS']
+      });
       return;
     }
 
@@ -357,12 +482,16 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('❌ API Error:', error);
+    
+    const isDevelopment = process.env.NODE_ENV === 'development';
+    
     res.status(500).json({
       success: false,
-      error: error.message,
+      error: isDevelopment ? error.message : 'Internal server error',
       response: '',
       confidence: 0,
-      category: 'error'
+      category: 'error',
+      timestamp: new Date().toISOString()
     });
   }
 }
