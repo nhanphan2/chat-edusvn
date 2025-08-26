@@ -103,42 +103,22 @@ class FirestoreChatbot {
         };
       }
 
-      // BƯỚC 1: Thử EXACT MATCH (cải thiện để giống Google Sheets)
-      console.log('🎯 === STEP 1: Trying EXACT MATCH ===');
-      const exactResponse = await this.findExactMatch(cleanMessage);
+      // BƯỚC 1 & 2: Kết hợp EXACT và SIMILARITY trong cùng 1 loop (giống Google Sheets)
+      console.log('🔍 === COMBINED SEARCH: EXACT + SIMILARITY ===');
+      const searchResponse = await this.findBestMatch(cleanMessage);
       
-      if (exactResponse.found) {
-        console.log('✅ EXACT MATCH found');
-        await this.logQuery(cleanMessage, exactResponse, userId);
+      if (searchResponse.found) {
+        console.log(`✅ MATCH found - Type: ${searchResponse.matchType}, Confidence: ${searchResponse.confidence}`);
+        await this.logQuery(cleanMessage, searchResponse, userId);
         
         return {
           success: true,
-          response: exactResponse.answer,
-          confidence: 1.0,
-          category: exactResponse.category,
-          matched_question: exactResponse.originalQuestion,
-          match_type: 'exact',
-          similarity: 1.0,
-          timestamp: new Date().toISOString()
-        };
-      }
-
-      // BƯỚC 2: Thử SIMILARITY MATCH
-      console.log('🔍 === STEP 2: Trying SIMILARITY MATCH ===');
-      const similarityResponse = await this.findSimilarityMatch(cleanMessage);
-      
-      if (similarityResponse.found) {
-        console.log(`✅ SIMILARITY MATCH found - Confidence: ${similarityResponse.confidence}`);
-        await this.logQuery(cleanMessage, similarityResponse, userId);
-        
-        return {
-          success: true,
-          response: similarityResponse.answer,
-          confidence: similarityResponse.confidence,
-          similarity: similarityResponse.similarity,
-          category: similarityResponse.category,
-          matched_question: similarityResponse.originalQuestion,
-          match_type: 'similarity',
+          response: searchResponse.answer,
+          confidence: searchResponse.confidence,
+          similarity: searchResponse.similarity,
+          category: searchResponse.category,
+          matched_question: searchResponse.originalQuestion,
+          match_type: searchResponse.matchType,
           timestamp: new Date().toISOString()
         };
       } else {
@@ -151,8 +131,8 @@ class FirestoreChatbot {
         return {
           success: false,
           response: noMatchMessage,
-          confidence: similarityResponse.confidence || 0,
-          similarity: similarityResponse.similarity || 0,
+          confidence: searchResponse.confidence || 0,
+          similarity: searchResponse.similarity || 0,
           category: 'no_match',
           match_type: 'none',
           message: 'No sufficient match found'
@@ -175,13 +155,149 @@ class FirestoreChatbot {
     }
   }
 
-  // 🎯 FIXED: Find exact match - Giống như Google Sheets
+  // 🔍 COMBINED: Tìm cả exact và similarity trong 1 function (giống Google Sheets)
+  async findBestMatch(userMessage) {
+    try {
+      const normalizedMessage = this.normalizeText(userMessage);
+      console.log(`🔍 === COMBINED SEARCH DEBUG ===`);
+      console.log(`📝 Original: "${userMessage}"`);
+      console.log(`📝 Normalized: "${normalizedMessage}"`);
+
+      // Lấy tất cả documents
+      const q = query(collection(this.db, 'chatbot_data'), limit(1000));
+      const querySnapshot = await getDocs(q);
+      
+      if (querySnapshot.empty) {
+        console.log('❌ No documents found');
+        return {
+          found: false,
+          answer: '',
+          category: 'no_match',
+          confidence: 0,
+          similarity: 0,
+          matchType: 'none'
+        };
+      }
+
+      console.log(`📊 Searching in ${querySnapshot.docs.length} documents`);
+
+      let bestMatch = null;
+      let bestSimilarity = 0;
+      let bestMatchType = 'none';
+
+      // Duyệt qua tất cả documents
+      for (const doc of querySnapshot.docs) {
+        const data = doc.data();
+        
+        if (!data.questions || !data.answer) {
+          continue;
+        }
+
+        // Kiểm tra từng question
+        for (const question of data.questions) {
+          if (!question) continue;
+
+          // Split keywords nếu có dấu phẩy
+          const questionKeywords = question.split(',').map(q => q.trim());
+          
+          for (const keyword of questionKeywords) {
+            const normalizedKeyword = this.normalizeText(keyword);
+            
+            // 1. KIỂM TRA EXACT MATCH TRƯỚC
+            if (normalizedMessage === normalizedKeyword) {
+              console.log(`🎯 EXACT MATCH: "${keyword}" === "${userMessage}"`);
+              return {
+                found: true,
+                answer: data.answer,
+                category: data.category || 'general',
+                originalQuestion: keyword,
+                docId: doc.id,
+                confidence: 1.0,
+                similarity: 1.0,
+                matchType: 'exact'
+              };
+            }
+
+            // 2. TÍNH SIMILARITY (cả khi không exact match)
+            const similarity = this.calculateSimilarity(normalizedMessage, keyword);
+            
+            console.log(`📊 "${keyword}" vs "${userMessage}": similarity = ${similarity.toFixed(3)}`);
+            
+            if (similarity > bestSimilarity) {
+              bestSimilarity = similarity;
+              bestMatch = {
+                answer: data.answer,
+                category: data.category || 'general',
+                originalQuestion: keyword,
+                docId: doc.id,
+                similarity: similarity
+              };
+              bestMatchType = 'similarity';
+              console.log(`🔥 NEW BEST: "${keyword}" (${similarity.toFixed(3)})`);
+            }
+          }
+        }
+      }
+
+      // Xác định confidence từ best similarity
+      const confidence = this.getConfidenceLevel(bestSimilarity);
+      
+      console.log(`\n🎯 FINAL RESULTS:`);
+      console.log(`Best similarity: ${bestSimilarity.toFixed(3)}`);
+      console.log(`Confidence: ${confidence}`);
+      console.log(`Match type: ${bestMatchType}`);
+
+      // Chấp nhận từ Medium similarity trở lên (>= 0.75)
+      if (confidence >= 0.75 && bestMatch) {
+        console.log(`✅ SIMILARITY MATCH ACCEPTED!`);
+        console.log(`📝 Matched: "${bestMatch.originalQuestion}"`);
+        console.log(`🤖 Answer: "${bestMatch.answer}"`);
+        
+        return {
+          found: true,
+          answer: bestMatch.answer,
+          category: bestMatch.category,
+          originalQuestion: bestMatch.originalQuestion,
+          docId: bestMatch.docId,
+          similarity: bestSimilarity,
+          confidence: confidence,
+          matchType: bestMatchType
+        };
+      } else {
+        console.log(`❌ NO SUFFICIENT MATCH (best: ${bestSimilarity.toFixed(3)}, confidence: ${confidence})`);
+        
+        return {
+          found: false,
+          answer: '',
+          category: 'no_match',
+          similarity: bestSimilarity,
+          confidence: confidence,
+          matchType: 'insufficient'
+        };
+      }
+
+    } catch (error) {
+      console.error('❌ Error in findBestMatch:', error);
+      return {
+        found: false,
+        answer: '',
+        category: 'error',
+        similarity: 0,
+        confidence: 0,
+        matchType: 'error'
+      };
+    }
+  }
+
+  // 🎯 FIXED: Find exact match - Với debug chi tiết
   async findExactMatch(userMessage) {
     try {
       const normalizedMessage = this.normalizeText(userMessage);
-      console.log(`🔍 Searching for exact match: "${normalizedMessage}"`);
+      console.log(`🔍 === EXACT MATCH DEBUG ===`);
+      console.log(`📝 Original message: "${userMessage}"`);
+      console.log(`📝 Normalized message: "${normalizedMessage}"`);
 
-      // Lấy TẤT CẢ documents từ Firestore (giống như Google Sheets)
+      // Lấy TẤT CẢ documents từ Firestore
       const q = query(collection(this.db, 'chatbot_data'), limit(1000));
       const querySnapshot = await getDocs(q);
       
@@ -199,32 +315,55 @@ class FirestoreChatbot {
 
       console.log(`📊 Total documents: ${querySnapshot.docs.length}`);
 
-      // Duyệt qua tất cả documents (giống logic Google Sheets)
+      // Debug: Hiển thị tất cả dữ liệu để kiểm tra
+      let debugCount = 0;
+      
       for (const doc of querySnapshot.docs) {
         const data = doc.data();
+        debugCount++;
+        
+        console.log(`\n--- Document ${debugCount}: ${doc.id} ---`);
+        console.log('Data structure:', {
+          hasQuestions: !!data.questions,
+          questionsType: Array.isArray(data.questions) ? 'array' : typeof data.questions,
+          questionsLength: data.questions?.length,
+          hasAnswer: !!data.answer,
+          category: data.category
+        });
         
         if (!data.questions || !data.answer) {
-          console.log(`⚠️ Document ${doc.id} missing questions or answer`);
+          console.log(`⚠️ Skipping - missing questions or answer`);
           continue;
         }
 
-        // Kiểm tra từng question trong array
-        for (const question of data.questions) {
+        // Debug: Hiển thị tất cả questions
+        console.log('Questions in this doc:', data.questions);
+
+        // Kiểm tra từng question
+        for (let i = 0; i < data.questions.length; i++) {
+          const question = data.questions[i];
           if (!question) continue;
 
-          // Split keywords nếu có dấu phẩy (giống Google Sheets)
+          console.log(`\n  Question ${i + 1}: "${question}"`);
+
+          // Split keywords nếu có dấu phẩy
           const questionKeywords = question.split(',').map(q => q.trim());
+          console.log(`  Keywords: [${questionKeywords.map(k => `"${k}"`).join(', ')}]`);
           
-          for (const keyword of questionKeywords) {
+          for (let j = 0; j < questionKeywords.length; j++) {
+            const keyword = questionKeywords[j];
             const normalizedKeyword = this.normalizeText(keyword);
             
-            console.log(`📝 Doc ${doc.id}: Checking "${keyword}" (normalized: "${normalizedKeyword}")`);
+            console.log(`    Keyword ${j + 1}: "${keyword}" -> "${normalizedKeyword}"`);
+            console.log(`    Compare: "${normalizedMessage}" === "${normalizedKeyword}" ?`);
             
-            // EXACT MATCH CHECK - giống y hệt Google Sheets
+            // EXACT MATCH CHECK
             if (normalizedMessage === normalizedKeyword) {
-              console.log(`✅ EXACT MATCH FOUND in document ${doc.id}!`);
-              console.log(`📝 Original keyword: "${keyword}"`);
-              console.log(`🤖 Answer: "${data.answer}"`);
+              console.log(`🎉 *** EXACT MATCH FOUND! ***`);
+              console.log(`📍 Document: ${doc.id}`);
+              console.log(`📍 Original question: "${question}"`);
+              console.log(`📍 Matched keyword: "${keyword}"`);
+              console.log(`📍 Answer: "${data.answer}"`);
               
               return {
                 found: true,
@@ -236,12 +375,15 @@ class FirestoreChatbot {
                 similarity: 1.0,
                 matchType: 'exact'
               };
+            } else {
+              console.log(`    ❌ No match`);
             }
           }
         }
       }
 
-      console.log(`❌ NO EXACT MATCH found for: "${userMessage}"`);
+      console.log(`\n❌ === NO EXACT MATCH FOUND ===`);
+      console.log(`Searched "${normalizedMessage}" in ${debugCount} documents`);
       
       return {
         found: false,
