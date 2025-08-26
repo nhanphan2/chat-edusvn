@@ -276,20 +276,29 @@ async findSimilarityMatch(userMessage) {
 
   // 🧮 Calculate Jaccard similarity
   calculateSimilarity(query, target) {
-    const queryWords = this.normalizeText(query).split(' ').filter(word => word.length > 0);
-    const targetWords = this.normalizeText(target).split(' ').filter(word => word.length > 0);
-    
-    const querySet = new Set(queryWords);
-    const targetSet = new Set(targetWords);
-    
-    const intersection = new Set([...querySet].filter(x => targetSet.has(x)));
-    const union = new Set([...querySet, ...targetSet]);
-    
-    if (union.size === 0) return 0;
-    
-    return intersection.size / union.size;
-  }
-
+  const queryWords = this.normalizeText(query).split(' ').filter(word => word.length > 0);
+  const targetWords = this.normalizeText(target).split(' ').filter(word => word.length > 0);
+  
+  console.log(`Comparing: "${query}" vs "${target}"`);
+  console.log(`Query words: [${queryWords.join(', ')}]`);
+  console.log(`Target words: [${targetWords.join(', ')}]`);
+  
+  const querySet = new Set(queryWords);
+  const targetSet = new Set(targetWords);
+  
+  const intersection = new Set([...querySet].filter(x => targetSet.has(x)));
+  const union = new Set([...querySet, ...targetSet]);
+  
+  console.log(`Intersection: [${[...intersection].join(', ')}] (${intersection.size})`);
+  console.log(`Union: [${[...union].join(', ')}] (${union.size})`);
+  
+  if (union.size === 0) return 0;
+  
+  const similarity = intersection.size / union.size;
+  console.log(`Similarity: ${similarity}`);
+  
+  return similarity;
+}
   // 🎯 Get confidence level
   getConfidenceLevel(similarity) {
     if (similarity >= 1.0) return 1.0;
