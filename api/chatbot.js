@@ -107,111 +107,38 @@ class FirestoreChatbot {
     }
   }
 
-  // 🎯 Find exact match in Firestore - Copy logic từ Google Sheets
-async findExactMatch(userMessage) {
- try {
-   const normalizedMessage = this.normalizeText(userMessage);
-   console.log(`🔍 Searching for EXACT MATCH: "${userMessage}"`);
-   console.log(`🧹 Normalized query: "${normalizedMessage}"`);
+  // 🎯 Find exact match in Firestore
+  async findExactMatch(userMessage) {
+    try {
+      const normalizedMessage = this.normalizeText(userMessage);
+      console.log(`🔍 Searching for exact match: "${normalizedMessage}"`);
 
-   // Lấy TẤT CẢ documents (như Google Sheets duyệt tất cả rows)
-   const q = query(collection(this.db, 'chatbot_data'), limit(1000));
-   const querySnapshot = await getDocs(q);
-   
-   if (querySnapshot.empty) {
-     console.log('❌ No documents in chatbot_data collection');
-     return {
-       found: false,
-       answer: '',
-       category: 'no_match',
-       confidence: 0,
-       similarity: 0,
-       matchType: 'none'
-     };
-   }
+      const q = query(
+        collection(this.db, 'chatbot_data'),
+        where('normalized_questions', 'array-contains', normalizedMessage),
+        limit(1)
+      );
 
-   console.log(`📊 Total documents: ${querySnapshot.docs.length}`);
+      const querySnapshot = await getDocs(q);
+      
+      if (!querySnapshot.empty) {
+        const doc = querySnapshot.docs[0];
+        const data = doc.data();
+        
+        console.log('✅ EXACT MATCH FOUND!');
+        
+        return {
+          found: true,
+          answer: data.answer,
+          category: data.category || 'general',
+          originalQuestion: data.questions[0],
+          docId: doc.id,
+          confidence: 1.0,
+          similarity: 1.0,
+          matchType: 'exact'
+        };
+      }
 
-   // Duyệt qua tất cả documents (giống Google Sheets duyệt từng row)
-   let docIndex = 0;
-   for (const doc of querySnapshot.docs) {
-     docIndex++;
-     const data = doc.data();
-     
-     if (!data.questions || !Array.isArray(data.questions) || !data.answer) {
-       console.log(`⚠️ Document ${docIndex} missing questions or answer`);
-       continue;
-     }
-
-     // Duyệt từng question trong document
-     for (const question of data.questions) {
-       if (!question) continue;
-
-       // Split keywords trong Question (nếu có dấu phẩy) - giống Google Sheets
-       const questionKeywords = question.split(',').map(q => q.trim());
-       
-       // Kiểm tra exact match với từng keyword
-       for (const keyword of questionKeywords) {
-         const normalizedKeyword = this.normalizeText(keyword);
-         
-         console.log(`📝 Doc ${docIndex}: Checking "${keyword}" (normalized: "${normalizedKeyword}")`);
-         
-         // EXACT MATCH CHECK - giống y hệt Google Sheets
-         if (normalizedMessage === normalizedKeyword) {
-           console.log(`✅ EXACT MATCH FOUND in document ${docIndex}!`);
-           console.log(`📝 Original keyword: "${keyword}"`);
-           console.log(`🤖 Answer: "${data.answer}"`);
-           
-           return {
-             found: true,
-             answer: data.answer,
-             category: data.category || 'general',
-             originalQuestion: keyword,
-             docId: doc.id,
-             confidence: 1.0,
-             similarity: 1.0,
-             matchType: 'exact'
-           };
-         }
-       }
-     }
-   }
-
-   console.log(`❌ NO EXACT MATCH found for: "${userMessage}"`);
-   
-   return {
-     found: false,
-     answer: '',
-     category: 'no_match',
-     confidence: 0,
-     similarity: 0,
-     matchType: 'none'
-   };
-
- } catch (error) {
-   console.error('❌ Error in findExactMatch:', error);
-   return {
-     found: false,
-     answer: '',
-     category: 'error',
-     confidence: 0,
-     similarity: 0,
-     matchType: 'error'
-   };
- }
-}
-
-  // 🔍 FIXED: Find similarity match - duyệt toàn bộ như Google Sheets
-async findSimilarityMatch(userMessage) {
-  try {
-    const normalizedMessage = this.normalizeText(userMessage);
-    console.log(`🔍 Searching for similarity: "${normalizedMessage}"`);
-
-    // Lấy TẤT CẢ documents (như Google Sheets)
-    const q = query(collection(this.db, 'chatbot_data'), limit(1000));
-    const querySnapshot = await getDocs(q);
-    
-    if (querySnapshot.empty) {
       return {
         found: false,
         answer: '',
@@ -220,75 +147,105 @@ async findSimilarityMatch(userMessage) {
         similarity: 0,
         matchType: 'none'
       };
+
+    } catch (error) {
+      console.error('❌ Error in findExactMatch:', error);
+      return {
+        found: false,
+        answer: '',
+        category: 'error',
+        confidence: 0,
+        similarity: 0,
+        matchType: 'error'
+      };
     }
+  }
 
-    let bestMatch = null;
-    let bestSimilarity = 0;
-
-    // Duyệt TẤT CẢ documents
-    querySnapshot.docs.forEach(doc => {
-      const data = doc.data();
+  // 🔍 Find similarity match in Firestore
+  async findSimilarityMatch(userMessage) {
+    try {
+      const normalizedMessage = this.normalizeText(userMessage);
+      const messageWords = normalizedMessage.split(' ').filter(word => word.length > 0);
       
-      if (!data.questions || !Array.isArray(data.questions)) return;
+      console.log(`🔍 Searching for similarity with words: [${messageWords.join(', ')}]`);
 
-      // Duyệt từng question
-      data.questions.forEach(question => {
-        // Split keywords nếu có dấu phẩy (giống Google Sheets)
-        const questionKeywords = question.split(',').map(q => q.trim());
+      const q = query(
+        collection(this.db, 'chatbot_data'),
+        where('keywords', 'array-contains-any', messageWords),
+        limit(50)
+      );
+
+      const querySnapshot = await getDocs(q);
+      
+      if (querySnapshot.empty) {
+        return {
+          found: false,
+          answer: '',
+          category: 'no_match',
+          confidence: 0,
+          similarity: 0,
+          matchType: 'none'
+        };
+      }
+
+      let bestMatch = null;
+      let bestSimilarity = 0;
+
+      querySnapshot.docs.forEach(doc => {
+        const data = doc.data();
         
-        questionKeywords.forEach(keyword => {
-          const similarity = this.calculateSimilarity(normalizedMessage, keyword);
+        data.questions.forEach(question => {
+          const similarity = this.calculateSimilarity(normalizedMessage, question);
           
           if (similarity > bestSimilarity) {
             bestSimilarity = similarity;
             bestMatch = {
               answer: data.answer,
               category: data.category || 'general',
-              originalQuestion: keyword,
+              originalQuestion: question,
               docId: doc.id,
               similarity: similarity
             };
           }
         });
       });
-    });
 
-    const confidence = this.getConfidenceLevel(bestSimilarity);
+      const confidence = this.getConfidenceLevel(bestSimilarity);
 
-    if (confidence >= 0.75) {
-      return {
-        found: true,
-        answer: bestMatch.answer,
-        category: bestMatch.category,
-        originalQuestion: bestMatch.originalQuestion,
-        docId: bestMatch.docId,
-        similarity: bestSimilarity,
-        confidence: confidence,
-        matchType: 'similarity'
-      };
-    } else {
+      if (confidence >= 0.75) {
+        return {
+          found: true,
+          answer: bestMatch.answer,
+          category: bestMatch.category,
+          originalQuestion: bestMatch.originalQuestion,
+          docId: bestMatch.docId,
+          similarity: bestSimilarity,
+          confidence: confidence,
+          matchType: 'similarity'
+        };
+      } else {
+        return {
+          found: false,
+          answer: '',
+          category: 'no_match',
+          similarity: bestSimilarity,
+          confidence: confidence,
+          matchType: 'insufficient'
+        };
+      }
+
+    } catch (error) {
+      console.error('❌ Error in findSimilarityMatch:', error);
       return {
         found: false,
         answer: '',
-        category: 'no_match',
-        similarity: bestSimilarity,
-        confidence: confidence,
-        matchType: 'insufficient'
+        category: 'error',
+        similarity: 0,
+        confidence: 0,
+        matchType: 'error'
       };
     }
-
-  } catch (error) {
-    console.error('❌ Error in findSimilarityMatch:', error);
-    return {
-      found: false,
-      answer: '',
-      category: 'error',
-      similarity: 0,
-      confidence: 0,
-      matchType: 'error'
-    };
   }
-}
 
   // 📊 Log query analytics
   async logQuery(userMessage, response, userId) {
@@ -316,29 +273,20 @@ async findSimilarityMatch(userMessage) {
 
   // 🧮 Calculate Jaccard similarity
   calculateSimilarity(query, target) {
-  const queryWords = this.normalizeText(query).split(' ').filter(word => word.length > 0);
-  const targetWords = this.normalizeText(target).split(' ').filter(word => word.length > 0);
-  
-  console.log(`Comparing: "${query}" vs "${target}"`);
-  console.log(`Query words: [${queryWords.join(', ')}]`);
-  console.log(`Target words: [${targetWords.join(', ')}]`);
-  
-  const querySet = new Set(queryWords);
-  const targetSet = new Set(targetWords);
-  
-  const intersection = new Set([...querySet].filter(x => targetSet.has(x)));
-  const union = new Set([...querySet, ...targetSet]);
-  
-  console.log(`Intersection: [${[...intersection].join(', ')}] (${intersection.size})`);
-  console.log(`Union: [${[...union].join(', ')}] (${union.size})`);
-  
-  if (union.size === 0) return 0;
-  
-  const similarity = intersection.size / union.size;
-  console.log(`Similarity: ${similarity}`);
-  
-  return similarity;
-}
+    const queryWords = this.normalizeText(query).split(' ').filter(word => word.length > 0);
+    const targetWords = this.normalizeText(target).split(' ').filter(word => word.length > 0);
+    
+    const querySet = new Set(queryWords);
+    const targetSet = new Set(targetWords);
+    
+    const intersection = new Set([...querySet].filter(x => targetSet.has(x)));
+    const union = new Set([...querySet, ...targetSet]);
+    
+    if (union.size === 0) return 0;
+    
+    return intersection.size / union.size;
+  }
+
   // 🎯 Get confidence level
   getConfidenceLevel(similarity) {
     if (similarity >= 1.0) return 1.0;
