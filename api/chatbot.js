@@ -182,7 +182,7 @@ class FirestoreChatbot {
       console.log(`🔍 Searching for exact match: "${normalizedMessage}"`);
 
       const q = query(
-        collection(this.db, 'data_chatbot'),
+        collection(this.db, 'chatbot_data'),
         where('normalized_questions', 'array-contains', normalizedMessage),
         limit(1)
       );
@@ -249,7 +249,7 @@ class FirestoreChatbot {
       }
 
       const q = query(
-        collection(this.db, 'data_chatbot'),
+        collection(this.db, 'chatbot_data'),
         where('keywords', 'array-contains-any', messageWords),
         limit(50)
       );
