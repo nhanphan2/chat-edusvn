@@ -107,59 +107,99 @@ class FirestoreChatbot {
     }
   }
 
-  // 🎯 Find exact match in Firestore
-  async findExactMatch(userMessage) {
-    try {
-      const normalizedMessage = this.normalizeText(userMessage);
-      console.log(`🔍 Searching for exact match: "${normalizedMessage}"`);
+  // 🎯 Find exact match in Firestore - Copy logic từ Google Sheets
+async findExactMatch(userMessage) {
+ try {
+   const normalizedMessage = this.normalizeText(userMessage);
+   console.log(`🔍 Searching for EXACT MATCH: "${userMessage}"`);
+   console.log(`🧹 Normalized query: "${normalizedMessage}"`);
 
-      const q = query(
-        collection(this.db, 'chatbot_data'),
-        where('normalized_questions', 'array-contains', normalizedMessage),
-        limit(1)
-      );
+   // Lấy TẤT CẢ documents (như Google Sheets duyệt tất cả rows)
+   const q = query(collection(this.db, 'chatbot_data'), limit(1000));
+   const querySnapshot = await getDocs(q);
+   
+   if (querySnapshot.empty) {
+     console.log('❌ No documents in chatbot_data collection');
+     return {
+       found: false,
+       answer: '',
+       category: 'no_match',
+       confidence: 0,
+       similarity: 0,
+       matchType: 'none'
+     };
+   }
 
-      const querySnapshot = await getDocs(q);
-      
-      if (!querySnapshot.empty) {
-        const doc = querySnapshot.docs[0];
-        const data = doc.data();
-        
-        console.log('✅ EXACT MATCH FOUND!');
-        
-        return {
-          found: true,
-          answer: data.answer,
-          category: data.category || 'general',
-          originalQuestion: data.questions[0],
-          docId: doc.id,
-          confidence: 1.0,
-          similarity: 1.0,
-          matchType: 'exact'
-        };
-      }
+   console.log(`📊 Total documents: ${querySnapshot.docs.length}`);
 
-      return {
-        found: false,
-        answer: '',
-        category: 'no_match',
-        confidence: 0,
-        similarity: 0,
-        matchType: 'none'
-      };
+   // Duyệt qua tất cả documents (giống Google Sheets duyệt từng row)
+   let docIndex = 0;
+   for (const doc of querySnapshot.docs) {
+     docIndex++;
+     const data = doc.data();
+     
+     if (!data.questions || !Array.isArray(data.questions) || !data.answer) {
+       console.log(`⚠️ Document ${docIndex} missing questions or answer`);
+       continue;
+     }
 
-    } catch (error) {
-      console.error('❌ Error in findExactMatch:', error);
-      return {
-        found: false,
-        answer: '',
-        category: 'error',
-        confidence: 0,
-        similarity: 0,
-        matchType: 'error'
-      };
-    }
-  }
+     // Duyệt từng question trong document
+     for (const question of data.questions) {
+       if (!question) continue;
+
+       // Split keywords trong Question (nếu có dấu phẩy) - giống Google Sheets
+       const questionKeywords = question.split(',').map(q => q.trim());
+       
+       // Kiểm tra exact match với từng keyword
+       for (const keyword of questionKeywords) {
+         const normalizedKeyword = this.normalizeText(keyword);
+         
+         console.log(`📝 Doc ${docIndex}: Checking "${keyword}" (normalized: "${normalizedKeyword}")`);
+         
+         // EXACT MATCH CHECK - giống y hệt Google Sheets
+         if (normalizedMessage === normalizedKeyword) {
+           console.log(`✅ EXACT MATCH FOUND in document ${docIndex}!`);
+           console.log(`📝 Original keyword: "${keyword}"`);
+           console.log(`🤖 Answer: "${data.answer}"`);
+           
+           return {
+             found: true,
+             answer: data.answer,
+             category: data.category || 'general',
+             originalQuestion: keyword,
+             docId: doc.id,
+             confidence: 1.0,
+             similarity: 1.0,
+             matchType: 'exact'
+           };
+         }
+       }
+     }
+   }
+
+   console.log(`❌ NO EXACT MATCH found for: "${userMessage}"`);
+   
+   return {
+     found: false,
+     answer: '',
+     category: 'no_match',
+     confidence: 0,
+     similarity: 0,
+     matchType: 'none'
+   };
+
+ } catch (error) {
+   console.error('❌ Error in findExactMatch:', error);
+   return {
+     found: false,
+     answer: '',
+     category: 'error',
+     confidence: 0,
+     similarity: 0,
+     matchType: 'error'
+   };
+ }
+}
 
   // 🔍 FIXED: Find similarity match - duyệt toàn bộ như Google Sheets
 async findSimilarityMatch(userMessage) {
