@@ -161,91 +161,94 @@ class FirestoreChatbot {
     }
   }
 
-  // 🔍 Find similarity match in Firestore
-  async findSimilarityMatch(userMessage) {
-    try {
-      const normalizedMessage = this.normalizeText(userMessage);
-      const messageWords = normalizedMessage.split(' ').filter(word => word.length > 0);
+  // 🔍 FIXED: Find similarity match - duyệt toàn bộ như Google Sheets
+async findSimilarityMatch(userMessage) {
+  try {
+    const normalizedMessage = this.normalizeText(userMessage);
+    console.log(`🔍 Searching for similarity: "${normalizedMessage}"`);
+
+    // Lấy TẤT CẢ documents (như Google Sheets)
+    const q = query(collection(this.db, 'chatbot_data'), limit(1000));
+    const querySnapshot = await getDocs(q);
+    
+    if (querySnapshot.empty) {
+      return {
+        found: false,
+        answer: '',
+        category: 'no_match',
+        confidence: 0,
+        similarity: 0,
+        matchType: 'none'
+      };
+    }
+
+    let bestMatch = null;
+    let bestSimilarity = 0;
+
+    // Duyệt TẤT CẢ documents
+    querySnapshot.docs.forEach(doc => {
+      const data = doc.data();
       
-      console.log(`🔍 Searching for similarity with words: [${messageWords.join(', ')}]`);
+      if (!data.questions || !Array.isArray(data.questions)) return;
 
-      const q = query(
-        collection(this.db, 'chatbot_data'),
-        where('keywords', 'array-contains-any', messageWords),
-        limit(50)
-      );
-
-      const querySnapshot = await getDocs(q);
-      
-      if (querySnapshot.empty) {
-        return {
-          found: false,
-          answer: '',
-          category: 'no_match',
-          confidence: 0,
-          similarity: 0,
-          matchType: 'none'
-        };
-      }
-
-      let bestMatch = null;
-      let bestSimilarity = 0;
-
-      querySnapshot.docs.forEach(doc => {
-        const data = doc.data();
+      // Duyệt từng question
+      data.questions.forEach(question => {
+        // Split keywords nếu có dấu phẩy (giống Google Sheets)
+        const questionKeywords = question.split(',').map(q => q.trim());
         
-        data.questions.forEach(question => {
-          const similarity = this.calculateSimilarity(normalizedMessage, question);
+        questionKeywords.forEach(keyword => {
+          const similarity = this.calculateSimilarity(normalizedMessage, keyword);
           
           if (similarity > bestSimilarity) {
             bestSimilarity = similarity;
             bestMatch = {
               answer: data.answer,
               category: data.category || 'general',
-              originalQuestion: question,
+              originalQuestion: keyword,
               docId: doc.id,
               similarity: similarity
             };
           }
         });
       });
+    });
 
-      const confidence = this.getConfidenceLevel(bestSimilarity);
+    const confidence = this.getConfidenceLevel(bestSimilarity);
 
-      if (confidence >= 0.75) {
-        return {
-          found: true,
-          answer: bestMatch.answer,
-          category: bestMatch.category,
-          originalQuestion: bestMatch.originalQuestion,
-          docId: bestMatch.docId,
-          similarity: bestSimilarity,
-          confidence: confidence,
-          matchType: 'similarity'
-        };
-      } else {
-        return {
-          found: false,
-          answer: '',
-          category: 'no_match',
-          similarity: bestSimilarity,
-          confidence: confidence,
-          matchType: 'insufficient'
-        };
-      }
-
-    } catch (error) {
-      console.error('❌ Error in findSimilarityMatch:', error);
+    if (confidence >= 0.75) {
+      return {
+        found: true,
+        answer: bestMatch.answer,
+        category: bestMatch.category,
+        originalQuestion: bestMatch.originalQuestion,
+        docId: bestMatch.docId,
+        similarity: bestSimilarity,
+        confidence: confidence,
+        matchType: 'similarity'
+      };
+    } else {
       return {
         found: false,
         answer: '',
-        category: 'error',
-        similarity: 0,
-        confidence: 0,
-        matchType: 'error'
+        category: 'no_match',
+        similarity: bestSimilarity,
+        confidence: confidence,
+        matchType: 'insufficient'
       };
     }
+
+  } catch (error) {
+    console.error('❌ Error in findSimilarityMatch:', error);
+    return {
+      found: false,
+      answer: '',
+      category: 'error',
+      similarity: 0,
+      confidence: 0,
+      matchType: 'error'
+    };
   }
+}
 
   // 📊 Log query analytics
   async logQuery(userMessage, response, userId) {
