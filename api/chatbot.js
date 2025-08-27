@@ -346,7 +346,7 @@ class FirestoreChatbot {
 
       console.log(`🧠 Checked ${checkedCount} docs, ${hasEmbeddingCount} had embeddings, best similarity: ${bestSimilarity.toFixed(3)}`);
 
-      if (bestSimilarity >= 0.85) { // Higher threshold for semantic match
+      if (bestSimilarity >= 0.8) { // Higher threshold for semantic match
         return {
           found: true,
           answer: bestMatch.answer,
