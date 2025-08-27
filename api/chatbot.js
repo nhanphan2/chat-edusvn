@@ -2,7 +2,7 @@
 // Thay thế hoàn toàn Google Apps Script + Google Sheets
 
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs, addDoc, limit } from 'firebase/firestore';
+import { getFirestore, collection, query, where, getDocs, addDoc, limit, startAfter } from 'firebase/firestore';
 import OpenAI from 'openai';
 
 // Firebase config từ environment variables
@@ -291,7 +291,7 @@ class FirestoreChatbot {
     }
   }
 
-  // 🧠 Find semantic match using OpenAI embeddings
+  // 🧠 Find semantic match using OpenAI embeddings với full coverage
   async findSemanticMatch(userMessage) {
     try {
       console.log(`🧠 Creating embedding for: "${userMessage}"`);
@@ -302,69 +302,42 @@ class FirestoreChatbot {
       });
       const queryEmbedding = queryResponse.data[0].embedding;
 
-      console.log('🧠 Loading all documents for semantic comparison...');
-      const docs = await getDocs(query(collection(this.db, 'chatbot_data'), limit(5000)));
-      
-      let bestMatch = null;
-      let bestSimilarity = 0;
-      let checkedCount = 0;
-      let hasEmbeddingCount = 0;
-
-      docs.forEach(doc => {
-        const data = doc.data();
-        checkedCount++;
-        
-        if (!data.embedding) {
-          return; // Skip documents without embeddings
-        }
-        hasEmbeddingCount++;
-
-        const similarity = this.cosineSimilarity(queryEmbedding, data.embedding);
-        
-        if (similarity > bestSimilarity) {
-          bestSimilarity = similarity;
-          
-          // Handle different question formats for originalQuestion
-          let originalQuestion;
-          if (Array.isArray(data.questions)) {
-            originalQuestion = data.questions[0];
-          } else if (typeof data.questions === 'string') {
-            originalQuestion = data.questions.split(',')[0].trim();
-          } else {
-            originalQuestion = data.questions || 'Unknown question';
-          }
-          
-          bestMatch = {
-            answer: data.answer,
-            category: data.category || 'general',
-            originalQuestion: originalQuestion,
-            docId: doc.id,
-            similarity: similarity
-          };
-        }
-      });
-
-      console.log(`🧠 Checked ${checkedCount} docs, ${hasEmbeddingCount} had embeddings, best similarity: ${bestSimilarity.toFixed(3)}`);
-
-      if (bestSimilarity >= 0.80) { // Higher threshold for semantic match
-        return {
-          found: true,
-          answer: bestMatch.answer,
-          category: bestMatch.category,
-          originalQuestion: bestMatch.originalQuestion,
-          docId: bestMatch.docId,
-          similarity: bestSimilarity,
-          confidence: bestSimilarity,
-          matchType: 'semantic'
-        };
+      // STRATEGY 1: Keyword Pre-filtering (Coverage ~70-80%)
+      console.log('🔍 === STRATEGY 1: Keyword Filtering ===');
+      const keywordResult = await this.searchWithKeywordFiltering(queryEmbedding, userMessage);
+      if (keywordResult.found && keywordResult.confidence >= 0.75) {
+        console.log(`✅ Found with keyword filtering: ${keywordResult.confidence.toFixed(3)}`);
+        return keywordResult;
       }
+
+      // STRATEGY 2: Category-based Search (Coverage ~15-20%)  
+      console.log('📚 === STRATEGY 2: Category Search ===');
+      const categoryResult = await this.searchByCategory(queryEmbedding, userMessage);
+      if (categoryResult.found && categoryResult.confidence >= 0.70) {
+        console.log(`✅ Found with category search: ${categoryResult.confidence.toFixed(3)}`);
+        return categoryResult;
+      }
+
+      // STRATEGY 3: Chunked Full Scan (Coverage ~5-10%)
+      console.log('🔄 === STRATEGY 3: Chunked Full Scan ===');
+      const fullScanResult = await this.chunkedFullScan(queryEmbedding);
+      if (fullScanResult.found) {
+        console.log(`✅ Found with full scan: ${fullScanResult.confidence.toFixed(3)}`);
+        return fullScanResult;
+      }
+
+      // Return best result even if not found
+      const bestResult = [keywordResult, categoryResult, fullScanResult]
+        .reduce((best, current) => 
+          (current.similarity > best.similarity) ? current : best
+        );
 
       return {
         found: false,
         answer: '',
         category: 'no_match',
-        similarity: bestSimilarity,
-        confidence: bestSimilarity,
+        similarity: bestResult.similarity,
+        confidence: bestResult.confidence,
         matchType: 'insufficient_semantic'
       };
 
@@ -379,6 +352,210 @@ class FirestoreChatbot {
         matchType: 'semantic_error'
       };
     }
+  }
+
+  // 🔍 STRATEGY 1: Keyword Pre-filtering
+  async searchWithKeywordFiltering(queryEmbedding, userMessage) {
+    try {
+      const normalizedMessage = this.normalizeText(userMessage);
+      const messageWords = normalizedMessage.split(' ').filter(word => word.length > 2);
+      
+      if (messageWords.length === 0) {
+        return { found: false, similarity: 0, confidence: 0 };
+      }
+
+      console.log(`🔍 Keyword filtering: [${messageWords.join(', ')}]`);
+      
+      const filteredQuery = query(
+        collection(this.db, 'chatbot_data'),
+        where('keywords', 'array-contains-any', messageWords),
+        limit(8000) // Tăng từ 50 lên 8000 để có coverage tốt hơn
+      );
+
+      const docs = await getDocs(filteredQuery);
+      console.log(`📊 Keyword filtered: ${docs.docs.length} candidates`);
+      
+      return await this.findBestMatch(docs, queryEmbedding, 'semantic_filtered');
+
+    } catch (error) {
+      console.error('❌ Error in keyword filtering:', error);
+      return { found: false, similarity: 0, confidence: 0 };
+    }
+  }
+
+  // 📚 STRATEGY 2: Category-based Search  
+  async searchByCategory(queryEmbedding, userMessage) {
+    try {
+      // Detect category từ user message
+      const detectedCategory = this.detectCategory(userMessage);
+      if (!detectedCategory) {
+        return { found: false, similarity: 0, confidence: 0 };
+      }
+
+      console.log(`📚 Category search: ${detectedCategory}`);
+      
+      const categoryQuery = query(
+        collection(this.db, 'chatbot_data'),
+        where('category', '==', detectedCategory),
+        limit(5000)
+      );
+
+      const docs = await getDocs(categoryQuery);
+      console.log(`📊 Category filtered: ${docs.docs.length} candidates`);
+      
+      return await this.findBestMatch(docs, queryEmbedding, 'semantic_category');
+
+    } catch (error) {
+      console.error('❌ Error in category search:', error);
+      return { found: false, similarity: 0, confidence: 0 };
+    }
+  }
+
+  // 🔄 STRATEGY 3: Chunked Full Scan (Last resort)
+  async chunkedFullScan(queryEmbedding, chunkSize = 10000) {
+    try {
+      console.log('🔄 Starting chunked full scan...');
+      
+      let bestMatch = null;
+      let bestSimilarity = 0;
+      let totalProcessed = 0;
+      let lastDoc = null;
+
+      // Process in chunks of 10k documents
+      for (let chunk = 0; chunk < 9; chunk++) {
+        let chunkQuery = query(
+          collection(this.db, 'chatbot_data'),
+          limit(chunkSize)
+        );
+
+        // Start from last document for pagination
+        if (lastDoc) {
+          chunkQuery = query(
+            collection(this.db, 'chatbot_data'),
+            startAfter(lastDoc),
+            limit(chunkSize)
+          );
+        }
+
+        const docs = await getDocs(chunkQuery);
+        
+        if (docs.empty) break;
+        
+        const chunkResult = await this.findBestMatch(docs, queryEmbedding, 'semantic_full_scan');
+        totalProcessed += docs.docs.length;
+        
+        if (chunkResult.similarity > bestSimilarity) {
+          bestSimilarity = chunkResult.similarity;
+          bestMatch = chunkResult;
+        }
+        
+        // Store last document for pagination
+        lastDoc = docs.docs[docs.docs.length - 1];
+        
+        console.log(`🔄 Chunk ${chunk + 1}: processed ${docs.docs.length} docs, best similarity: ${bestSimilarity.toFixed(3)}`);
+        
+        // Early exit if found good match
+        if (bestSimilarity >= 0.80) {
+          console.log('🎯 Early exit - good match found');
+          break;
+        }
+
+        // Add small delay to avoid overwhelming Firestore
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+
+      console.log(`🔄 Full scan complete: ${totalProcessed} docs processed`);
+
+      if (bestSimilarity >= 0.70) {
+        return {
+          ...bestMatch,
+          found: true
+        };
+      }
+
+      return {
+        found: false,
+        similarity: bestSimilarity,
+        confidence: bestSimilarity,
+        matchType: 'insufficient_full_scan'
+      };
+
+    } catch (error) {
+      console.error('❌ Error in chunked full scan:', error);
+      return { found: false, similarity: 0, confidence: 0 };
+    }
+  }
+
+  // 🎯 Helper: Find best match trong document set
+  async findBestMatch(docs, queryEmbedding, matchType) {
+    let bestMatch = null;
+    let bestSimilarity = 0;
+    let hasEmbeddingCount = 0;
+
+    docs.forEach(doc => {
+      const data = doc.data();
+      
+      if (!data.embedding) return;
+      hasEmbeddingCount++;
+
+      const similarity = this.cosineSimilarity(queryEmbedding, data.embedding);
+      
+      if (similarity > bestSimilarity) {
+        bestSimilarity = similarity;
+        
+        let originalQuestion;
+        if (Array.isArray(data.questions)) {
+          originalQuestion = data.questions[0];
+        } else if (typeof data.questions === 'string') {
+          originalQuestion = data.questions.split(',')[0].trim();
+        } else {
+          originalQuestion = data.questions || 'Unknown question';
+        }
+        
+        bestMatch = {
+          answer: data.answer,
+          category: data.category || 'general',
+          originalQuestion: originalQuestion,
+          docId: doc.id,
+          similarity: similarity,
+          confidence: similarity,
+          matchType: matchType
+        };
+      }
+    });
+
+    console.log(`📊 Processed ${hasEmbeddingCount} embeddings, best similarity: ${bestSimilarity.toFixed(3)}`);
+
+    return {
+      ...bestMatch,
+      found: bestSimilarity > 0,
+      similarity: bestSimilarity,
+      confidence: bestSimilarity
+    };
+  }
+
+  // 🤖 Helper: Detect category từ user message
+  detectCategory(message) {
+    const normalizedMessage = this.normalizeText(message);
+    
+    const categoryKeywords = {
+      'toán học': ['toan', 'tinh', 'phep', 'cong', 'tru', 'nhan', 'chia', 'hinh', 'tam', 'giac', 'so', 'chu', 'vi'],
+      'vật lý': ['vat', 'ly', 'luc', 'van', 'toc', 'gia', 'toc', 'nhiet', 'do', 'dien', 'ap'],
+      'hóa học': ['hoa', 'hoc', 'nguyen', 'to', 'phan', 'tu', 'phan', 'ung', 'axit', 'baz'],
+      'lịch sử': ['lich', 'su', 'chien', 'tranh', 'vua', 'chua', 'nam', 'the', 'ky'],
+      'địa lý': ['dia', 'ly', 'ban', 'do', 'song', 'nui', 'thanh', 'pho', 'nuoc'],
+      'sinh học': ['sinh', 'hoc', 'dong', 'vat', 'thuc', 'vat', 'te', 'bao', 'gen'],
+      'tiếng việt': ['van', 'hoc', 'tho', 'truyen', 'ngu', 'phap', 'chu', 'viet'],
+      'tiếng anh': ['english', 'grammar', 'vocabulary', 'speaking', 'listening']
+    };
+
+    for (const [category, keywords] of Object.entries(categoryKeywords)) {
+      if (keywords.some(keyword => normalizedMessage.includes(keyword))) {
+        return category;
+      }
+    }
+    
+    return null;
   }
 
   // 🧮 Calculate cosine similarity between two vectors
