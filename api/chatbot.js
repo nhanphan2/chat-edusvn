@@ -303,7 +303,7 @@ class FirestoreChatbot {
       const queryEmbedding = queryResponse.data[0].embedding;
 
       console.log('🧠 Loading all documents for semantic comparison...');
-      const docs = await getDocs(collection(this.db, 'chatbot_data'));
+      const docs = await getDocs(query(collection(this.db, 'chatbot_data'), limit(1000)));
       
       let bestMatch = null;
       let bestSimilarity = 0;
