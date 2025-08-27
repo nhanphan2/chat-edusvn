@@ -291,7 +291,7 @@ class FirestoreChatbot {
     }
   }
 
- // 🧠 Find semantic match using OpenAI embeddings với keyword pre-filtering
+  // 🧠 Find semantic match using OpenAI embeddings
   async findSemanticMatch(userMessage) {
     try {
       console.log(`🧠 Creating embedding for: "${userMessage}"`);
@@ -302,39 +302,17 @@ class FirestoreChatbot {
       });
       const queryEmbedding = queryResponse.data[0].embedding;
 
-      // STEP 1: Extract keywords để pre-filter
-      const normalizedMessage = this.normalizeText(userMessage);
-      const messageWords = normalizedMessage.split(' ').filter(word => word.length > 2); // Lọc từ >= 3 ký tự
+      console.log('🧠 Loading all documents for semantic comparison...');
+      const docs = await getDocs(query(collection(this.db, 'chatbot_data'), limit(5000)));
       
-      console.log(`🔍 Pre-filtering with keywords: [${messageWords.join(', ')}]`);
-      
-      if (messageWords.length === 0) {
-        console.log('⚠️ No meaningful keywords found, fallback to full scan');
-        return await this.fullSemanticScan(queryEmbedding);
-      }
-
-      // STEP 2: Pre-filter documents có chứa ít nhất 1 keyword
-      const filteredQuery = query(
-        collection(this.db, 'chatbot_data'),
-        where('keywords', 'array-contains-any', messageWords),
-        limit(5000) // Giới hạn 5000 docs thay vì 90k
-      );
-
-      const docs = await getDocs(filteredQuery);
-      console.log(`📊 Filtered to ${docs.docs.length} candidate documents`);
-      
-      if (docs.empty) {
-        console.log('⚠️ No keyword matches found, fallback to full scan');
-        return await this.fullSemanticScan(queryEmbedding);
-      }
-
-      // STEP 3: Semantic search chỉ trong filtered subset
       let bestMatch = null;
       let bestSimilarity = 0;
+      let checkedCount = 0;
       let hasEmbeddingCount = 0;
 
       docs.forEach(doc => {
         const data = doc.data();
+        checkedCount++;
         
         if (!data.embedding) {
           return; // Skip documents without embeddings
@@ -346,7 +324,7 @@ class FirestoreChatbot {
         if (similarity > bestSimilarity) {
           bestSimilarity = similarity;
           
-          // Handle different question formats
+          // Handle different question formats for originalQuestion
           let originalQuestion;
           if (Array.isArray(data.questions)) {
             originalQuestion = data.questions[0];
@@ -366,10 +344,9 @@ class FirestoreChatbot {
         }
       });
 
-      console.log(`🧠 Processed ${hasEmbeddingCount} embeddings from filtered set, best similarity: ${bestSimilarity.toFixed(3)}`);
+      console.log(`🧠 Checked ${checkedCount} docs, ${hasEmbeddingCount} had embeddings, best similarity: ${bestSimilarity.toFixed(3)}`);
 
-      // Threshold thấp hơn vì đã được pre-filter bởi keywords
-      if (bestSimilarity >= 0.75) { // Giảm từ 0.85 xuống 0.75
+      if (bestSimilarity >= 0.80) { // Higher threshold for semantic match
         return {
           found: true,
           answer: bestMatch.answer,
@@ -378,7 +355,7 @@ class FirestoreChatbot {
           docId: bestMatch.docId,
           similarity: bestSimilarity,
           confidence: bestSimilarity,
-          matchType: 'semantic_filtered'
+          matchType: 'semantic'
         };
       }
 
@@ -393,86 +370,6 @@ class FirestoreChatbot {
 
     } catch (error) {
       console.error('❌ Error in findSemanticMatch:', error);
-      return {
-        found: false,
-        answer: '',
-        category: 'error',
-        similarity: 0,
-        confidence: 0,
-        matchType: 'semantic_error'
-      };
-    }
-  }
-
-  // 🔄 Fallback method - full semantic scan (dùng khi không có keywords)
-  async fullSemanticScan(queryEmbedding, maxDocs = 10000) {
-    try {
-      console.log('🔄 Performing full semantic scan as fallback...');
-      
-      // Limit để tránh timeout, chỉ scan 10k docs đầu
-      const q = query(collection(this.db, 'chatbot_data'), limit(maxDocs));
-      const docs = await getDocs(q);
-      
-      let bestMatch = null;
-      let bestSimilarity = 0;
-      let hasEmbeddingCount = 0;
-
-      docs.forEach(doc => {
-        const data = doc.data();
-        
-        if (!data.embedding) return;
-        hasEmbeddingCount++;
-
-        const similarity = this.cosineSimilarity(queryEmbedding, data.embedding);
-        
-        if (similarity > bestSimilarity) {
-          bestSimilarity = similarity;
-          
-          let originalQuestion;
-          if (Array.isArray(data.questions)) {
-            originalQuestion = data.questions[0];
-          } else if (typeof data.questions === 'string') {
-            originalQuestion = data.questions.split(',')[0].trim();
-          } else {
-            originalQuestion = data.questions || 'Unknown question';
-          }
-          
-          bestMatch = {
-            answer: data.answer,
-            category: data.category || 'general',
-            originalQuestion: originalQuestion,
-            docId: doc.id,
-            similarity: similarity
-          };
-        }
-      });
-
-      console.log(`🔄 Full scan: processed ${hasEmbeddingCount} embeddings, best similarity: ${bestSimilarity.toFixed(3)}`);
-
-      if (bestSimilarity >= 0.80) { // Threshold cao hơn cho full scan
-        return {
-          found: true,
-          answer: bestMatch.answer,
-          category: bestMatch.category,
-          originalQuestion: bestMatch.originalQuestion,
-          docId: bestMatch.docId,
-          similarity: bestSimilarity,
-          confidence: bestSimilarity,
-          matchType: 'semantic_full'
-        };
-      }
-
-      return {
-        found: false,
-        answer: '',
-        category: 'no_match',
-        similarity: bestSimilarity,
-        confidence: bestSimilarity,
-        matchType: 'insufficient_semantic'
-      };
-
-    } catch (error) {
-      console.error('❌ Error in fullSemanticScan:', error);
       return {
         found: false,
         answer: '',
