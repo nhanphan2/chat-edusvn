@@ -1,8 +1,9 @@
-// 🔥 api/chatbot.js - Vercel API Route
+// 🔥 api/chatbot.js - Vercel API Route with Semantic Search
 // Thay thế hoàn toàn Google Apps Script + Google Sheets
 
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs, addDoc, limit } from 'firebase/firestore';
+import OpenAI from 'openai';
 
 // Firebase config từ environment variables
 const firebaseConfig = {
@@ -26,6 +27,7 @@ if (!app) {
 class FirestoreChatbot {
   constructor() {
     this.db = db;
+    this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
 
   // 🎯 Main endpoint handler
@@ -81,14 +83,34 @@ class FirestoreChatbot {
           match_type: 'similarity',
           timestamp: new Date().toISOString()
         };
+      }
+
+      // BƯỚC 3: Thử SEMANTIC MATCH
+      console.log('🧠 === STEP 3: Trying SEMANTIC MATCH ===');
+      const semanticResponse = await this.findSemanticMatch(userMessage);
+
+      if (semanticResponse.found) {
+        console.log(`✅ SEMANTIC MATCH found - Confidence: ${semanticResponse.confidence}`);
+        await this.logQuery(userMessage, semanticResponse, userId);
+        
+        return {
+          success: true,
+          response: semanticResponse.answer,
+          confidence: semanticResponse.confidence,
+          similarity: semanticResponse.similarity,
+          category: semanticResponse.category,
+          matched_question: semanticResponse.originalQuestion,
+          match_type: 'semantic',
+          timestamp: new Date().toISOString()
+        };
       } else {
         console.log(`❌ NO MATCH found for: "${userMessage}"`);
         
         return {
           success: false,
           response: '',
-          confidence: similarityResponse.confidence || 0,
-          similarity: similarityResponse.similarity || 0,
+          confidence: semanticResponse.confidence || 0,
+          similarity: semanticResponse.similarity || 0,
           category: 'no_match',
           match_type: 'none',
           message: 'No sufficient match found'
@@ -127,11 +149,21 @@ class FirestoreChatbot {
         
         console.log('✅ EXACT MATCH FOUND!');
         
+        // Handle different data structures for questions
+        let originalQuestion;
+        if (Array.isArray(data.questions)) {
+          originalQuestion = data.questions[0];
+        } else if (typeof data.questions === 'string') {
+          originalQuestion = data.questions.split(',')[0].trim();
+        } else {
+          originalQuestion = data.questions || 'Unknown question';
+        }
+        
         return {
           found: true,
           answer: data.answer,
           category: data.category || 'general',
-          originalQuestion: data.questions[0],
+          originalQuestion: originalQuestion,
           docId: doc.id,
           confidence: 1.0,
           similarity: 1.0,
@@ -194,7 +226,19 @@ class FirestoreChatbot {
       querySnapshot.docs.forEach(doc => {
         const data = doc.data();
         
-        data.questions.forEach(question => {
+        // Handle different question formats
+        let questionsArray = [];
+        if (Array.isArray(data.questions)) {
+          questionsArray = data.questions;
+        } else if (typeof data.questions === 'string') {
+          questionsArray = data.questions.split(',').map(q => q.trim());
+        } else if (data.questions) {
+          questionsArray = [data.questions];
+        }
+
+        questionsArray.forEach(question => {
+          if (!question) return;
+          
           const similarity = this.calculateSimilarity(normalizedMessage, question);
           
           if (similarity > bestSimilarity) {
@@ -245,6 +289,112 @@ class FirestoreChatbot {
         matchType: 'error'
       };
     }
+  }
+
+  // 🧠 Find semantic match using OpenAI embeddings
+  async findSemanticMatch(userMessage) {
+    try {
+      console.log(`🧠 Creating embedding for: "${userMessage}"`);
+      
+      const queryResponse = await this.openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: userMessage
+      });
+      const queryEmbedding = queryResponse.data[0].embedding;
+
+      console.log('🧠 Loading all documents for semantic comparison...');
+      const docs = await getDocs(collection(this.db, 'chatbot_data'));
+      
+      let bestMatch = null;
+      let bestSimilarity = 0;
+      let checkedCount = 0;
+      let hasEmbeddingCount = 0;
+
+      docs.forEach(doc => {
+        const data = doc.data();
+        checkedCount++;
+        
+        if (!data.embedding) {
+          return; // Skip documents without embeddings
+        }
+        hasEmbeddingCount++;
+
+        const similarity = this.cosineSimilarity(queryEmbedding, data.embedding);
+        
+        if (similarity > bestSimilarity) {
+          bestSimilarity = similarity;
+          
+          // Handle different question formats for originalQuestion
+          let originalQuestion;
+          if (Array.isArray(data.questions)) {
+            originalQuestion = data.questions[0];
+          } else if (typeof data.questions === 'string') {
+            originalQuestion = data.questions.split(',')[0].trim();
+          } else {
+            originalQuestion = data.questions || 'Unknown question';
+          }
+          
+          bestMatch = {
+            answer: data.answer,
+            category: data.category || 'general',
+            originalQuestion: originalQuestion,
+            docId: doc.id,
+            similarity: similarity
+          };
+        }
+      });
+
+      console.log(`🧠 Checked ${checkedCount} docs, ${hasEmbeddingCount} had embeddings, best similarity: ${bestSimilarity.toFixed(3)}`);
+
+      if (bestSimilarity >= 0.85) { // Higher threshold for semantic match
+        return {
+          found: true,
+          answer: bestMatch.answer,
+          category: bestMatch.category,
+          originalQuestion: bestMatch.originalQuestion,
+          docId: bestMatch.docId,
+          similarity: bestSimilarity,
+          confidence: bestSimilarity,
+          matchType: 'semantic'
+        };
+      }
+
+      return {
+        found: false,
+        answer: '',
+        category: 'no_match',
+        similarity: bestSimilarity,
+        confidence: bestSimilarity,
+        matchType: 'insufficient_semantic'
+      };
+
+    } catch (error) {
+      console.error('❌ Error in findSemanticMatch:', error);
+      return {
+        found: false,
+        answer: '',
+        category: 'error',
+        similarity: 0,
+        confidence: 0,
+        matchType: 'semantic_error'
+      };
+    }
+  }
+
+  // 🧮 Calculate cosine similarity between two vectors
+  cosineSimilarity(a, b) {
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    
+    for (let i = 0; i < a.length; i++) {
+      dotProduct += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 
   // 📊 Log query analytics
