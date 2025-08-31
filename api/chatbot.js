@@ -4,6 +4,13 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs, addDoc, limit } from 'firebase/firestore';
 import OpenAI from 'openai';
+import { createClient } from '@supabase/supabase-js';
+
+// Supabase config
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 // Firebase config từ environment variables
 const firebaseConfig = {
@@ -293,93 +300,68 @@ class FirestoreChatbot {
 
   // 🧠 Find semantic match using OpenAI embeddings
   async findSemanticMatch(userMessage) {
-    try {
-      console.log(`🧠 Creating embedding for: "${userMessage}"`);
+  try {
+    console.log(`🧠 Creating embedding for: "${userMessage}"`);
+    
+    const queryResponse = await this.openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: userMessage
+    });
+
+    console.log('🧠 Querying Supabase for semantic matches...');
+    
+    const { data, error } = await supabase.rpc('match_embeddings', {
+      query_embedding: queryResponse.data[0].embedding,
+      match_threshold: 0.75,
+      match_count: 1
+    });
+
+    if (error) {
+      console.error('Supabase semantic search error:', error);
+      throw error;
+    }
+
+    if (data && data.length > 0) {
+      const match = data[0];
       
-      const queryResponse = await this.openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: userMessage
-      });
-      const queryEmbedding = queryResponse.data[0].embedding;
-
-      console.log('🧠 Loading all documents for semantic comparison...');
-      const docs = await getDocs(query(collection(this.db, 'chatbot_data'), limit(5000)));
+      console.log(`✅ SUPABASE SEMANTIC MATCH found - Similarity: ${match.similarity.toFixed(3)}`);
       
-      let bestMatch = null;
-      let bestSimilarity = 0;
-      let checkedCount = 0;
-      let hasEmbeddingCount = 0;
-
-      docs.forEach(doc => {
-        const data = doc.data();
-        checkedCount++;
-        
-        if (!data.embedding) {
-          return; // Skip documents without embeddings
-        }
-        hasEmbeddingCount++;
-
-        const similarity = this.cosineSimilarity(queryEmbedding, data.embedding);
-        
-        if (similarity > bestSimilarity) {
-          bestSimilarity = similarity;
-          
-          // Handle different question formats for originalQuestion
-          let originalQuestion;
-          if (Array.isArray(data.questions)) {
-            originalQuestion = data.questions[0];
-          } else if (typeof data.questions === 'string') {
-            originalQuestion = data.questions.split(',')[0].trim();
-          } else {
-            originalQuestion = data.questions || 'Unknown question';
-          }
-          
-          bestMatch = {
-            answer: data.answer,
-            category: data.category || 'general',
-            originalQuestion: originalQuestion,
-            docId: doc.id,
-            similarity: similarity
-          };
-        }
-      });
-
-      console.log(`🧠 Checked ${checkedCount} docs, ${hasEmbeddingCount} had embeddings, best similarity: ${bestSimilarity.toFixed(3)}`);
-
-      if (bestSimilarity >= 0.80) { // Higher threshold for semantic match
-        return {
-          found: true,
-          answer: bestMatch.answer,
-          category: bestMatch.category,
-          originalQuestion: bestMatch.originalQuestion,
-          docId: bestMatch.docId,
-          similarity: bestSimilarity,
-          confidence: bestSimilarity,
-          matchType: 'semantic'
-        };
-      }
-
       return {
-        found: false,
-        answer: '',
-        category: 'no_match',
-        similarity: bestSimilarity,
-        confidence: bestSimilarity,
-        matchType: 'insufficient_semantic'
-      };
-
-    } catch (error) {
-      console.error('❌ Error in findSemanticMatch:', error);
-      return {
-        found: false,
-        answer: '',
-        category: 'error',
-        similarity: 0,
-        confidence: 0,
-        matchType: 'semantic_error'
+        found: true,
+        answer: match.answer,
+        category: match.category || 'general',
+        originalQuestion: Array.isArray(match.questions) 
+          ? match.questions[0] 
+          : match.questions,
+        docId: match.id,
+        similarity: match.similarity,
+        confidence: match.similarity,
+        matchType: 'semantic'
       };
     }
-  }
+
+    console.log('❌ No semantic match found in Supabase');
+    return {
+      found: false,
+      answer: '',
+      category: 'no_match',
+      similarity: 0,
+      confidence: 0,
+      matchType: 'insufficient_semantic'
+    };
+
+  } catch (error) {
+    console.error('❌ Error in findSemanticMatch:', error);
+    return {
+    found: false,
+    answer: '',
+    category: 'no_match',
+    similarity: 0,
+    confidence: 0,
+    matchType: 'semantic_disabled'
+  };
+}
+}
 
   // 🧮 Calculate cosine similarity between two vectors
   cosineSimilarity(a, b) {
