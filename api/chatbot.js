@@ -353,14 +353,14 @@ class FirestoreChatbot {
   } catch (error) {
     console.error('❌ Error in findSemanticMatch:', error);
     return {
-      found: false,
-      answer: '',
-      category: 'error',
-      similarity: 0,
-      confidence: 0,
-      matchType: 'semantic_error'
-    };
-  }
+    found: false,
+    answer: '',
+    category: 'no_match',
+    similarity: 0,
+    confidence: 0,
+    matchType: 'semantic_disabled'
+  };
+}
 }
 
   // 🧮 Calculate cosine similarity between two vectors
