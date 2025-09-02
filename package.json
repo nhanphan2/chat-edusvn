@@ -1,23 +1,39 @@
 {
-  "name": "firestore-chatbot-api",
-  "version": "1.0.0",
-  "description": "Firestore-based chatbot API deployed on Vercel",
+  "name": "postgres-chatbot-api",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "PostgreSQL-based chatbot API deployed on Vercel with pgvector semantic search",
   "main": "api/chatbot.js",
   "scripts": {
     "build": "echo 'Build completed'",
-    "dev": "vercel dev", 
-    "start": "node api/chatbot.js"
+    "dev": "vercel dev",
+    "start": "node api/chatbot.js",
+    "test-connection": "node test-postgres-connection.js",
+    "verify-db": "node verify-database.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.56.1",
-    "firebase": "^10.7.1",
-    "firebase-admin": "^11.11.1",
-    "openai": "^5.15.0"
+    "openai": "^5.16.0",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
-    "vercel": "^32.7.2"
+    "vercel": "^32.7.2",
+    "dotenv": "^16.6.1"
   },
   "engines": {
     "node": "22.x"
-  }
+  },
+  "keywords": [
+    "chatbot",
+    "postgresql",
+    "pgvector",
+    "semantic-search",
+    "openai",
+    "vercel",
+    "api"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "your-github-repo-url"
+  },
+  "license": "MIT"
 }
