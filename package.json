@@ -1,8 +1,8 @@
 {
-  "name": "postgres-chatbot-api",
-  "version": "2.0.0",
+  "name": "hybrid-chatbot-api",
+  "version": "2.1.0",
   "type": "module",
-  "description": "PostgreSQL-based chatbot API deployed on Vercel with pgvector semantic search",
+  "description": "Hybrid Firebase + PostgreSQL chatbot API with semantic search",
   "main": "api/chatbot.js",
   "scripts": {
     "build": "echo 'Build completed'",
@@ -12,6 +12,7 @@
     "verify-db": "node verify-database.js"
   },
   "dependencies": {
+    "firebase": "^10.7.1",
     "openai": "^5.16.0",
     "pg": "^8.16.3"
   },
@@ -24,9 +25,11 @@
   },
   "keywords": [
     "chatbot",
+    "firebase",
     "postgresql",
     "pgvector",
     "semantic-search",
+    "hybrid",
     "openai",
     "vercel",
     "api"
