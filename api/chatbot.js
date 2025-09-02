@@ -1,79 +1,68 @@
-// 🔥 api/chatbot.js - Vercel API Route with PostgreSQL + pgvector (Debug Version)
-// Thay thế Firebase + Supabase bằng PostgreSQL trên DigitalOcean
+// 🔥 api/chatbot.js - Hybrid: Firebase for basic search + PostgreSQL for embeddings
+// Firebase handles high traffic, PostgreSQL only for semantic search
 
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, query, where, getDocs, addDoc, limit } from 'firebase/firestore';
 import pkg from 'pg';
 const { Client } = pkg;
 import OpenAI from 'openai';
 
-class PostgresChatbot {
+// Firebase config
+const firebaseConfig = {
+  apiKey: process.env.FIREBASE_API_KEY,
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.FIREBASE_APP_ID
+};
+
+// Initialize Firebase
+let app;
+let db;
+if (!app) {
+  app = initializeApp(firebaseConfig);
+  db = getFirestore(app);
+}
+
+class HybridChatbot {
   constructor() {
+    this.db = db;
     this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     this.pgClient = null;
   }
 
-  // 🔗 Connect to PostgreSQL
-  async connectDB() {
-    // DEBUG: Log all environment variables
-    console.log('🔍 Environment Variables Debug:', {
-      POSTGRES_HOST: process.env.POSTGRES_HOST,
-      POSTGRES_PORT: process.env.POSTGRES_PORT,
-      POSTGRES_DB: process.env.POSTGRES_DB,
-      POSTGRES_USER: process.env.POSTGRES_USER,
-      POSTGRES_PASSWORD: process.env.POSTGRES_PASSWORD ? '***SET***' : 'NOT SET',
-      OPENAI_API_KEY: process.env.OPENAI_API_KEY ? '***SET***' : 'NOT SET',
-      NODE_ENV: process.env.NODE_ENV
-    });
-
+  // 🔗 Connect to PostgreSQL only for semantic search
+  async connectPostgreSQL() {
     if (this.pgClient && !this.pgClient._ending) {
       return this.pgClient;
     }
 
-    // Fallback values if env vars not loaded
+    // Validate required environment variables
+    if (!process.env.POSTGRES_HOST || !process.env.POSTGRES_PASSWORD) {
+      throw new Error('Missing required PostgreSQL environment variables');
+    }
+
     const dbConfig = {
-      host: process.env.POSTGRES_HOST || '167.99.69.130',
+      host: process.env.POSTGRES_HOST,
       port: parseInt(process.env.POSTGRES_PORT) || 5432,
-      database: process.env.POSTGRES_DB || 'chatbot_db',
-      user: process.env.POSTGRES_USER || 'chatbot_user',
-      password: process.env.POSTGRES_PASSWORD || 'quydz123@Aa',
+      database: process.env.POSTGRES_DB,
+      user: process.env.POSTGRES_USER,
+      password: process.env.POSTGRES_PASSWORD,
       ssl: false,
       connectionTimeoutMillis: 10000,
-      idleTimeoutMillis: 30000,
     };
 
-    console.log('🔍 Final DB Config:', {
-      ...dbConfig,
-      password: '***HIDDEN***'
-    });
-
     this.pgClient = new Client(dbConfig);
-
-    try {
-      console.log('🔗 Attempting PostgreSQL connection...');
-      await this.pgClient.connect();
-      console.log('✅ Connected to PostgreSQL successfully');
-      
-      // Test query
-      const testResult = await this.pgClient.query('SELECT COUNT(*) FROM documents');
-      console.log(`📊 Documents available: ${testResult.rows[0].count}`);
-      
-      return this.pgClient;
-    } catch (error) {
-      console.error('❌ PostgreSQL connection failed:', {
-        message: error.message,
-        code: error.code,
-        host: dbConfig.host,
-        port: dbConfig.port
-      });
-      throw error;
-    }
+    await this.pgClient.connect();
+    console.log('✅ Connected to PostgreSQL for semantic search');
+    return this.pgClient;
   }
 
   // 🎯 Main endpoint handler
   async handleRequest(userMessage, userId = 'anonymous', lang = 'vi') {
-    let client = null;
-    
     try {
-      console.log('📨 Received request:', { userMessage, userId, lang });
+      console.log('📨 Received request:', { userMessage, userId });
       
       if (!userMessage || userMessage.trim() === '') {
         return {
@@ -85,17 +74,13 @@ class PostgresChatbot {
         };
       }
 
-      // Connect to database
-      console.log('🔗 Connecting to database...');
-      client = await this.connectDB();
-
-      // BƯỚC 1: Thử EXACT MATCH
-      console.log('🎯 === STEP 1: Trying EXACT MATCH ===');
-      const exactResponse = await this.findExactMatch(userMessage, client);
+      // BƯỚC 1: Thử EXACT MATCH với Firebase (nhanh, không tốn bandwidth nhiều)
+      console.log('🔥 === STEP 1: Firebase EXACT MATCH ===');
+      const exactResponse = await this.findExactMatchFirebase(userMessage);
       
       if (exactResponse.found) {
-        console.log('✅ EXACT MATCH found');
-        await this.logQuery(userMessage, exactResponse, userId, client);
+        console.log('✅ EXACT MATCH found in Firebase');
+        await this.logQueryFirebase(userMessage, exactResponse, userId);
         
         return {
           success: true,
@@ -105,17 +90,18 @@ class PostgresChatbot {
           matched_question: exactResponse.originalQuestion,
           match_type: 'exact',
           similarity: 1.0,
+          source: 'firebase',
           timestamp: new Date().toISOString()
         };
       }
 
-      // BƯỚC 2: Thử SIMILARITY MATCH
-      console.log('🔍 === STEP 2: Trying SIMILARITY MATCH ===');
-      const similarityResponse = await this.findSimilarityMatch(userMessage, client);
+      // BƯỚC 2: Thử SIMILARITY MATCH với Firebase (vẫn nhanh)
+      console.log('🔥 === STEP 2: Firebase SIMILARITY MATCH ===');
+      const similarityResponse = await this.findSimilarityMatchFirebase(userMessage);
       
       if (similarityResponse.found) {
-        console.log(`✅ SIMILARITY MATCH found - Confidence: ${similarityResponse.confidence}`);
-        await this.logQuery(userMessage, similarityResponse, userId, client);
+        console.log(`✅ SIMILARITY MATCH found in Firebase - Confidence: ${similarityResponse.confidence}`);
+        await this.logQueryFirebase(userMessage, similarityResponse, userId);
         
         return {
           success: true,
@@ -125,17 +111,18 @@ class PostgresChatbot {
           category: similarityResponse.category,
           matched_question: similarityResponse.originalQuestion,
           match_type: 'similarity',
+          source: 'firebase',
           timestamp: new Date().toISOString()
         };
       }
 
-      // BƯỚC 3: Thử SEMANTIC MATCH với pgvector
-      console.log('🧠 === STEP 3: Trying SEMANTIC MATCH ===');
-      const semanticResponse = await this.findSemanticMatch(userMessage, client);
+      // BƯỚC 3: Chỉ khi không tìm thấy mới dùng PostgreSQL SEMANTIC SEARCH
+      console.log('🧠 === STEP 3: PostgreSQL SEMANTIC MATCH ===');
+      const semanticResponse = await this.findSemanticMatchPostgres(userMessage);
 
       if (semanticResponse.found) {
-        console.log(`✅ SEMANTIC MATCH found - Confidence: ${semanticResponse.confidence}`);
-        await this.logQuery(userMessage, semanticResponse, userId, client);
+        console.log(`✅ SEMANTIC MATCH found in PostgreSQL - Confidence: ${semanticResponse.confidence}`);
+        await this.logQueryFirebase(userMessage, semanticResponse, userId);
         
         return {
           success: true,
@@ -145,21 +132,21 @@ class PostgresChatbot {
           category: semanticResponse.category,
           matched_question: semanticResponse.originalQuestion,
           match_type: 'semantic',
+          source: 'postgresql',
           timestamp: new Date().toISOString()
         };
-      } else {
-        console.log(`❌ NO MATCH found for: "${userMessage}"`);
-        
-        return {
-          success: false,
-          response: `Xin lỗi, tôi không tìm thấy câu trả lời phù hợp cho câu hỏi "${userMessage}". Bạn có thể thử hỏi một cách khác không?`,
-          confidence: semanticResponse.confidence || 0,
-          similarity: semanticResponse.similarity || 0,
-          category: 'no_match',
-          match_type: 'none',
-          message: 'No sufficient match found'
-        };
       }
+
+      // Không tìm thấy gì
+      console.log(`❌ NO MATCH found for: "${userMessage}"`);
+      return {
+        success: false,
+        response: `Xin lỗi, tôi không tìm thấy câu trả lời phù hợp cho câu hỏi "${userMessage}". Bạn có thể thử hỏi một cách khác không?`,
+        confidence: 0,
+        category: 'no_match',
+        match_type: 'none',
+        source: 'none'
+      };
 
     } catch (error) {
       console.error('❌ Error in handleRequest:', error);
@@ -171,11 +158,11 @@ class PostgresChatbot {
         category: "error"
       };
     } finally {
-      // Close connection
-      if (client && !client._ending) {
+      // Close PostgreSQL connection if opened
+      if (this.pgClient && !this.pgClient._ending) {
         try {
-          await client.end();
-          console.log('🔌 Database connection closed');
+          await this.pgClient.end();
+          this.pgClient = null;
         } catch (err) {
           console.error('Error closing PostgreSQL connection:', err);
         }
@@ -183,35 +170,31 @@ class PostgresChatbot {
     }
   }
 
-  // 🎯 Find exact match in PostgreSQL
-  async findExactMatch(userMessage, client) {
+  // 🔥 Find exact match in Firebase
+  async findExactMatchFirebase(userMessage) {
     try {
       const normalizedMessage = this.normalizeText(userMessage);
-      console.log(`🔍 Searching for exact match: "${normalizedMessage}"`);
-
-      const query = `
-        SELECT id, questions, normalized_questions, answer, category
-        FROM documents 
-        WHERE $1 = ANY(normalized_questions)
-        LIMIT 1
-      `;
-
-      const result = await client.query(query, [normalizedMessage]);
       
-      if (result.rows.length > 0) {
-        const doc = result.rows[0];
+      const q = query(
+        collection(this.db, 'chatbot_data'),
+        where('normalized_questions', 'array-contains', normalizedMessage),
+        limit(1)
+      );
+
+      const querySnapshot = await getDocs(q);
+      
+      if (!querySnapshot.empty) {
+        const doc = querySnapshot.docs[0];
+        const data = doc.data();
         
-        console.log('✅ EXACT MATCH FOUND!');
-        
-        // Get first question
-        const originalQuestion = Array.isArray(doc.questions) 
-          ? doc.questions[0] 
-          : doc.questions;
+        let originalQuestion = Array.isArray(data.questions) 
+          ? data.questions[0] 
+          : data.questions;
         
         return {
           found: true,
-          answer: doc.answer,
-          category: doc.category || 'general',
+          answer: data.answer,
+          category: data.category || 'general',
           originalQuestion: originalQuestion,
           docId: doc.id,
           confidence: 1.0,
@@ -220,85 +203,40 @@ class PostgresChatbot {
         };
       }
 
-      return {
-        found: false,
-        answer: '',
-        category: 'no_match',
-        confidence: 0,
-        similarity: 0,
-        matchType: 'none'
-      };
-
+      return { found: false };
     } catch (error) {
-      console.error('❌ Error in findExactMatch:', error);
-      return {
-        found: false,
-        answer: '',
-        category: 'error',
-        confidence: 0,
-        similarity: 0,
-        matchType: 'error'
-      };
+      console.error('❌ Error in findExactMatchFirebase:', error);
+      return { found: false };
     }
   }
 
-  // 🔍 Find similarity match in PostgreSQL
-  async findSimilarityMatch(userMessage, client) {
+  // 🔥 Find similarity match in Firebase
+  async findSimilarityMatchFirebase(userMessage) {
     try {
       const normalizedMessage = this.normalizeText(userMessage);
       const messageWords = normalizedMessage.split(' ').filter(word => word.length > 1);
       
-      console.log(`🔍 Searching for similarity with words: [${messageWords.join(', ')}]`);
+      if (messageWords.length === 0) return { found: false };
 
-      if (messageWords.length === 0) {
-        return {
-          found: false,
-          answer: '',
-          category: 'no_match',
-          confidence: 0,
-          similarity: 0,
-          matchType: 'none'
-        };
-      }
+      const q = query(
+        collection(this.db, 'chatbot_data'),
+        where('keywords', 'array-contains-any', messageWords),
+        limit(50)
+      );
 
-      // Search by keywords overlap
-      const query = `
-        SELECT id, questions, answer, category, keywords
-        FROM documents 
-        WHERE keywords && $1
-        ORDER BY (
-          SELECT COUNT(*) 
-          FROM unnest(keywords) keyword 
-          WHERE keyword = ANY($1)
-        ) DESC
-        LIMIT 50
-      `;
-
-      const result = await client.query(query, [messageWords]);
+      const querySnapshot = await getDocs(q);
       
-      if (result.rows.length === 0) {
-        console.log('❌ No similarity matches found');
-        return {
-          found: false,
-          answer: '',
-          category: 'no_match',
-          confidence: 0,
-          similarity: 0,
-          matchType: 'none'
-        };
-      }
+      if (querySnapshot.empty) return { found: false };
 
       let bestMatch = null;
       let bestSimilarity = 0;
 
-      result.rows.forEach(doc => {
-        // Get questions array
-        let questionsArray = [];
-        if (Array.isArray(doc.questions)) {
-          questionsArray = doc.questions;
-        } else if (typeof doc.questions === 'string') {
-          questionsArray = [doc.questions];
-        }
+      querySnapshot.docs.forEach(doc => {
+        const data = doc.data();
+        
+        let questionsArray = Array.isArray(data.questions) 
+          ? data.questions 
+          : [data.questions];
 
         questionsArray.forEach(question => {
           if (!question) return;
@@ -308,8 +246,8 @@ class PostgresChatbot {
           if (similarity > bestSimilarity) {
             bestSimilarity = similarity;
             bestMatch = {
-              answer: doc.answer,
-              category: doc.category || 'general',
+              answer: data.answer,
+              category: data.category || 'general',
               originalQuestion: question,
               docId: doc.id,
               similarity: similarity
@@ -319,7 +257,6 @@ class PostgresChatbot {
       });
 
       const confidence = this.getConfidenceLevel(bestSimilarity);
-      console.log(`🔍 Best similarity: ${bestSimilarity.toFixed(3)}, confidence: ${confidence.toFixed(3)}`);
 
       if (confidence >= 0.75 && bestMatch) {
         return {
@@ -332,45 +269,32 @@ class PostgresChatbot {
           confidence: confidence,
           matchType: 'similarity'
         };
-      } else {
-        return {
-          found: false,
-          answer: '',
-          category: 'no_match',
-          similarity: bestSimilarity,
-          confidence: confidence,
-          matchType: 'insufficient'
-        };
       }
 
+      return { found: false, similarity: bestSimilarity, confidence: confidence };
     } catch (error) {
-      console.error('❌ Error in findSimilarityMatch:', error);
-      return {
-        found: false,
-        answer: '',
-        category: 'error',
-        similarity: 0,
-        confidence: 0,
-        matchType: 'error'
-      };
+      console.error('❌ Error in findSimilarityMatchFirebase:', error);
+      return { found: false };
     }
   }
 
-  // 🧠 Find semantic match using pgvector
-  async findSemanticMatch(userMessage, client) {
+  // 🧠 Find semantic match in PostgreSQL (chỉ khi cần thiết)
+  async findSemanticMatchPostgres(userMessage) {
     try {
-      console.log(`🧠 Creating embedding for: "${userMessage}"`);
+      console.log('🧠 Creating embedding for semantic search...');
       
-      // Create embedding with OpenAI
+      // Create embedding
       const queryResponse = await this.openai.embeddings.create({
         model: "text-embedding-3-small",
         input: userMessage
       });
 
       const queryEmbedding = queryResponse.data[0].embedding;
-      console.log('🧠 Querying PostgreSQL for semantic matches...');
       
-      // Use pgvector for similarity search
+      // Connect to PostgreSQL
+      const client = await this.connectPostgreSQL();
+      
+      // Semantic search with pgvector
       const query = `
         SELECT 
           id, 
@@ -381,20 +305,16 @@ class PostgresChatbot {
         FROM documents 
         WHERE embedding IS NOT NULL
         ORDER BY embedding <=> $1
-        LIMIT 5
+        LIMIT 3
       `;
 
-      // Convert embedding to PostgreSQL vector format
       const embeddingVector = `[${queryEmbedding.join(',')}]`;
       const result = await client.query(query, [embeddingVector]);
 
       if (result.rows.length > 0) {
         const bestMatch = result.rows[0];
-        console.log(`🧠 Best semantic similarity: ${bestMatch.similarity.toFixed(3)}`);
         
         if (bestMatch.similarity >= 0.75) {
-          console.log(`✅ SEMANTIC MATCH found - Similarity: ${bestMatch.similarity.toFixed(3)}`);
-          
           const originalQuestion = Array.isArray(bestMatch.questions) 
             ? bestMatch.questions[0] 
             : bestMatch.questions;
@@ -412,60 +332,36 @@ class PostgresChatbot {
         }
       }
 
-      console.log('❌ No semantic match found in PostgreSQL');
       return {
         found: false,
-        answer: '',
-        category: 'no_match',
         similarity: result.rows.length > 0 ? result.rows[0].similarity : 0,
-        confidence: 0,
-        matchType: 'insufficient_semantic'
+        confidence: 0
       };
 
     } catch (error) {
-      console.error('❌ Error in findSemanticMatch:', error);
-      return {
-        found: false,
-        answer: '',
-        category: 'no_match',
-        similarity: 0,
-        confidence: 0,
-        matchType: 'semantic_error'
-      };
+      console.error('❌ Error in findSemanticMatchPostgres:', error);
+      return { found: false, confidence: 0, similarity: 0 };
     }
   }
 
-  // 📊 Log query analytics to PostgreSQL
-  async logQuery(userMessage, response, userId, client) {
+  // 📊 Log to Firebase (cheaper than PostgreSQL)
+  async logQueryFirebase(userMessage, response, userId) {
     try {
-      console.log('📊 Logging query analytics...');
-      
-      const query = `
-        INSERT INTO query_analytics (
-          user_message, bot_answer, confidence, category, 
-          user_id, match_type, similarity, doc_id, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id
-      `;
+      const logData = {
+        timestamp: new Date(),
+        userMessage: userMessage,
+        botAnswer: response.answer,
+        confidence: response.confidence || 1.0,
+        category: response.category,
+        userId: userId,
+        matchType: response.matchType || 'exact',
+        similarity: response.similarity || 1.0,
+        source: response.source || 'firebase'
+      };
 
-      const values = [
-        userMessage,
-        response.answer,
-        response.confidence || 1.0,
-        response.category,
-        userId,
-        response.matchType || 'exact',
-        response.similarity || 1.0,
-        response.docId || null,
-        new Date()
-      ];
-
-      const result = await client.query(query, values);
-      console.log(`📊 Query logged with ID: ${result.rows[0].id}`);
-      
+      await addDoc(collection(this.db, 'query_analytics'), logData);
     } catch (error) {
-      console.error('Error logging query:', error);
-      // Don't throw error, just log it
+      console.error('Error logging query to Firebase:', error);
     }
   }
 
@@ -480,9 +376,7 @@ class PostgresChatbot {
     const intersection = new Set([...querySet].filter(x => targetSet.has(x)));
     const union = new Set([...querySet, ...targetSet]);
     
-    if (union.size === 0) return 0;
-    
-    return intersection.size / union.size;
+    return union.size === 0 ? 0 : intersection.size / union.size;
   }
 
   // 🎯 Get confidence level
@@ -522,40 +416,30 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle preflight request
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
 
   try {
-    console.log(`📡 API Request: ${req.method} ${req.url}`);
-    
     let userMessage, userId, lang;
 
-    // Handle GET request
     if (req.method === 'GET') {
       userMessage = req.query.q || req.query.message || '';
       userId = req.query.userId || req.query.user_id || 'anonymous';
       lang = req.query.lang || 'vi';
-    }
-    // Handle POST request
-    else if (req.method === 'POST') {
+    } else if (req.method === 'POST') {
       userMessage = req.body.message || req.body.q || '';
       userId = req.body.userId || req.body.user_id || 'anonymous';
       lang = req.body.lang || 'vi';
-    }
-    else {
+    } else {
       res.status(405).json({ error: 'Method not allowed' });
       return;
     }
 
-    console.log(`📡 Processing message: "${userMessage}"`);
-
-    const chatbot = new PostgresChatbot();
+    const chatbot = new HybridChatbot();
     const result = await chatbot.handleRequest(userMessage, userId, lang);
 
-    console.log(`📡 Sending response: ${result.success ? 'SUCCESS' : 'FAILURE'}`);
     res.status(200).json(result);
 
   } catch (error) {
