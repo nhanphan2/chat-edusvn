@@ -1,4 +1,4 @@
-// 🔥 api/chatbot.js - Vercel API Route with PostgreSQL + pgvector
+// 🔥 api/chatbot.js - Vercel API Route with PostgreSQL + pgvector (Debug Version)
 // Thay thế Firebase + Supabase bằng PostgreSQL trên DigitalOcean
 
 import pkg from 'pg';
@@ -13,27 +13,57 @@ class PostgresChatbot {
 
   // 🔗 Connect to PostgreSQL
   async connectDB() {
+    // DEBUG: Log all environment variables
+    console.log('🔍 Environment Variables Debug:', {
+      POSTGRES_HOST: process.env.POSTGRES_HOST,
+      POSTGRES_PORT: process.env.POSTGRES_PORT,
+      POSTGRES_DB: process.env.POSTGRES_DB,
+      POSTGRES_USER: process.env.POSTGRES_USER,
+      POSTGRES_PASSWORD: process.env.POSTGRES_PASSWORD ? '***SET***' : 'NOT SET',
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY ? '***SET***' : 'NOT SET',
+      NODE_ENV: process.env.NODE_ENV
+    });
+
     if (this.pgClient && !this.pgClient._ending) {
       return this.pgClient;
     }
 
-    this.pgClient = new Client({
-      host: process.env.POSTGRES_HOST, 
-      port: process.env.POSTGRES_PORT,
-      database: process.env.POSTGRES_DB, 
-      user: process.env.POSTGRES_USER,    
-      password: process.env.POSTGRES_PASSWORD,
+    // Fallback values if env vars not loaded
+    const dbConfig = {
+      host: process.env.POSTGRES_HOST || '167.99.69.130',
+      port: parseInt(process.env.POSTGRES_PORT) || 5432,
+      database: process.env.POSTGRES_DB || 'chatbot_db',
+      user: process.env.POSTGRES_USER || 'chatbot_user',
+      password: process.env.POSTGRES_PASSWORD || 'quydz123@Aa',
       ssl: false,
-      connectionTimeoutMillis: 5000,
+      connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 30000,
+    };
+
+    console.log('🔍 Final DB Config:', {
+      ...dbConfig,
+      password: '***HIDDEN***'
     });
 
+    this.pgClient = new Client(dbConfig);
+
     try {
+      console.log('🔗 Attempting PostgreSQL connection...');
       await this.pgClient.connect();
-      console.log('✅ Connected to PostgreSQL');
+      console.log('✅ Connected to PostgreSQL successfully');
+      
+      // Test query
+      const testResult = await this.pgClient.query('SELECT COUNT(*) FROM documents');
+      console.log(`📊 Documents available: ${testResult.rows[0].count}`);
+      
       return this.pgClient;
     } catch (error) {
-      console.error('❌ PostgreSQL connection failed:', error);
+      console.error('❌ PostgreSQL connection failed:', {
+        message: error.message,
+        code: error.code,
+        host: dbConfig.host,
+        port: dbConfig.port
+      });
       throw error;
     }
   }
@@ -45,7 +75,7 @@ class PostgresChatbot {
     try {
       console.log('📨 Received request:', { userMessage, userId, lang });
       
-      if (!userMessage) {
+      if (!userMessage || userMessage.trim() === '') {
         return {
           success: false,
           error: 'No message provided',
@@ -56,6 +86,7 @@ class PostgresChatbot {
       }
 
       // Connect to database
+      console.log('🔗 Connecting to database...');
       client = await this.connectDB();
 
       // BƯỚC 1: Thử EXACT MATCH
@@ -121,7 +152,7 @@ class PostgresChatbot {
         
         return {
           success: false,
-          response: '',
+          response: `Xin lỗi, tôi không tìm thấy câu trả lời phù hợp cho câu hỏi "${userMessage}". Bạn có thể thử hỏi một cách khác không?`,
           confidence: semanticResponse.confidence || 0,
           similarity: semanticResponse.similarity || 0,
           category: 'no_match',
@@ -135,7 +166,7 @@ class PostgresChatbot {
       return {
         success: false,
         error: error.toString(),
-        response: '',
+        response: `Lỗi hệ thống: ${error.message}`,
         confidence: 0,
         category: "error"
       };
@@ -144,6 +175,7 @@ class PostgresChatbot {
       if (client && !client._ending) {
         try {
           await client.end();
+          console.log('🔌 Database connection closed');
         } catch (err) {
           console.error('Error closing PostgreSQL connection:', err);
         }
@@ -245,6 +277,7 @@ class PostgresChatbot {
       const result = await client.query(query, [messageWords]);
       
       if (result.rows.length === 0) {
+        console.log('❌ No similarity matches found');
         return {
           found: false,
           answer: '',
@@ -286,6 +319,7 @@ class PostgresChatbot {
       });
 
       const confidence = this.getConfidenceLevel(bestSimilarity);
+      console.log(`🔍 Best similarity: ${bestSimilarity.toFixed(3)}, confidence: ${confidence.toFixed(3)}`);
 
       if (confidence >= 0.75 && bestMatch) {
         return {
@@ -356,6 +390,7 @@ class PostgresChatbot {
 
       if (result.rows.length > 0) {
         const bestMatch = result.rows[0];
+        console.log(`🧠 Best semantic similarity: ${bestMatch.similarity.toFixed(3)}`);
         
         if (bestMatch.similarity >= 0.75) {
           console.log(`✅ SEMANTIC MATCH found - Similarity: ${bestMatch.similarity.toFixed(3)}`);
@@ -403,6 +438,8 @@ class PostgresChatbot {
   // 📊 Log query analytics to PostgreSQL
   async logQuery(userMessage, response, userId, client) {
     try {
+      console.log('📊 Logging query analytics...');
+      
       const query = `
         INSERT INTO query_analytics (
           user_message, bot_answer, confidence, category, 
@@ -423,7 +460,8 @@ class PostgresChatbot {
         new Date()
       ];
 
-      await client.query(query, values);
+      const result = await client.query(query, values);
+      console.log(`📊 Query logged with ID: ${result.rows[0].id}`);
       
     } catch (error) {
       console.error('Error logging query:', error);
@@ -491,6 +529,8 @@ export default async function handler(req, res) {
   }
 
   try {
+    console.log(`📡 API Request: ${req.method} ${req.url}`);
+    
     let userMessage, userId, lang;
 
     // Handle GET request
@@ -510,9 +550,12 @@ export default async function handler(req, res) {
       return;
     }
 
+    console.log(`📡 Processing message: "${userMessage}"`);
+
     const chatbot = new PostgresChatbot();
     const result = await chatbot.handleRequest(userMessage, userId, lang);
 
+    console.log(`📡 Sending response: ${result.success ? 'SUCCESS' : 'FAILURE'}`);
     res.status(200).json(result);
 
   } catch (error) {
@@ -520,7 +563,7 @@ export default async function handler(req, res) {
     res.status(500).json({
       success: false,
       error: error.message,
-      response: '',
+      response: `Lỗi API: ${error.message}`,
       confidence: 0,
       category: 'error'
     });
