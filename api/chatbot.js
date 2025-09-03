@@ -258,7 +258,7 @@ class HybridChatbot {
 
       const confidence = this.getConfidenceLevel(bestSimilarity);
 
-      if (confidence >= 0.75 && bestMatch) {
+      if (confidence >= 0.8 && bestMatch) {
         return {
           found: true,
           answer: bestMatch.answer,
@@ -314,7 +314,7 @@ class HybridChatbot {
       if (result.rows.length > 0) {
         const bestMatch = result.rows[0];
         
-        if (bestMatch.similarity >= 0.75) {
+        if (bestMatch.similarity >= 0.8) {
           const originalQuestion = Array.isArray(bestMatch.questions) 
             ? bestMatch.questions[0] 
             : bestMatch.questions;
