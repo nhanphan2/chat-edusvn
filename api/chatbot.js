@@ -396,13 +396,6 @@ class HybridChatbot {
       .toLowerCase()
       .trim()
       .replace(/\s+/g, ' ')
-      .replace(/[áàảãạăắằẳẵặâấầẩẫậ]/g, 'a')
-      .replace(/[éèẻẽẹêếềểễệ]/g, 'e')
-      .replace(/[íìỉĩị]/g, 'i')
-      .replace(/[óòỏõọôốồổỗộơớờởỡợ]/g, 'o')
-      .replace(/[úùủũụưứừửữự]/g, 'u')
-      .replace(/[ýỳỷỹỵ]/g, 'y')
-      .replace(/đ/g, 'd')
       .replace(/[^\w\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
